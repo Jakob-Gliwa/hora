@@ -62,6 +62,9 @@ fn validate_routes(
 
 pub(super) fn validate(config: &Config) -> anyhow::Result<()> {
     validate_token("server.auth_token", config.server.auth_token.as_ref())?;
+    if config.alerts.repeat_alert_secs != 0 {
+        validate_period("alerts.repeat_alert_secs", config.alerts.repeat_alert_secs)?;
+    }
     for (group, token) in &config.server.group_tokens {
         validate_token(&format!("server.group_tokens[{group:?}]"), Some(token))?;
         // A token for a group no monitor belongs to guards nothing - that is

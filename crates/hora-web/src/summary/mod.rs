@@ -141,7 +141,12 @@ pub(crate) async fn build_summary(
     let (availability, percentiles) = split_window(&window);
     let statuses: HashMap<String, MonitorState> = recent
         .iter()
-        .map(|(id, checks)| (id.clone(), db::derive_status(checks, ctx.threshold)))
+        .map(|(id, checks)| {
+            (
+                id.clone(),
+                db::derive_status(checks, i64::from(config.fail_threshold(id))),
+            )
+        })
         .collect();
 
     let data = MonitorData {
@@ -615,9 +620,17 @@ pub(crate) async fn recent_checks_map(
 
     // Owned ids and pool handles: borrowed ones trip the compiler's
     // higher-ranked lifetime inference once this future is spawned.
-    let ids: Vec<String> = monitors.iter().map(|monitor| monitor.id.clone()).collect();
+    let ids: Vec<(String, i64)> = monitors
+        .iter()
+        .map(|monitor| {
+            (
+                monitor.id.clone(),
+                monitor.fail_threshold.map_or(limit, i64::from),
+            )
+        })
+        .collect();
     futures_util::stream::iter(ids)
-        .map(|id| {
+        .map(|(id, limit)| {
             let store = store.clone();
             async move {
                 let checks = or_empty(db::recent_checks(&store, &id, limit).await, "recent checks");

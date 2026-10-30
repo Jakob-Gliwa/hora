@@ -123,6 +123,9 @@ pub struct Monitor {
     /// Immediate re-probes after a failed check before recording it
     /// (default 1, at most 5).
     pub probe_retries: Option<u32>,
+    pub fail_threshold: Option<u32>,
+    pub retry_interval_secs: Option<u64>,
+    pub repeat_alert_secs: Option<u64>,
     /// Restrict this monitor's alerts to these channel names. Unset = every
     /// configured channel.
     pub notify: Option<Vec<String>>,
@@ -268,6 +271,7 @@ pub struct DnsSpec {
 /// A passive heartbeat: the job pings `/api/push/{id}`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PushSpec {
+    pub poll_secs: Option<u64>,
     /// Heartbeats expected per cron run rather than every interval.
     pub schedule: Option<PushSchedule>,
 }
@@ -487,6 +491,22 @@ impl Monitor {
     #[must_use]
     pub fn retention_days(&self, default: u16) -> u16 {
         self.retention_days.unwrap_or(default)
+    }
+
+    #[must_use]
+    pub fn fail_threshold(&self, default: u32) -> u32 {
+        self.fail_threshold.unwrap_or(default).max(1)
+    }
+
+    /// Evaluation cadence; a passive heartbeat deadline need not be its polling period.
+    #[must_use]
+    pub fn poll_interval(&self) -> Duration {
+        match &self.spec {
+            MonitorKind::Push(push) => {
+                Duration::from_secs(push.poll_secs.unwrap_or(self.interval_secs))
+            }
+            _ => self.interval(),
+        }
     }
 
     /// Immediate re-probes after a failure before recording it (default 1).

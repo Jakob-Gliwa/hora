@@ -64,7 +64,7 @@ pub(crate) async fn tune(args: &[String]) -> Result<(), CliError> {
             group: monitor.group.as_deref(),
             kind: monitor.kind().as_str(),
             interval_secs: monitor.interval_secs,
-            current_threshold: config.alerts.fail_threshold,
+            current_threshold: monitor.fail_threshold(config.alerts.fail_threshold),
             current_degraded_over_ms: monitor.degraded_over_ms,
         };
         let tuning = hora_core::tune::analyze(&ctx, &samples);

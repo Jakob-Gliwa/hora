@@ -2067,7 +2067,13 @@ fn the_example_config_round_trips_into_typed_monitors() {
     );
     assert!(smtp.checks_cert());
     let backup = config.find_monitor("nightly-backup").expect("push monitor");
-    assert_eq!(backup.spec, MonitorKind::Push(PushSpec { schedule: None }));
+    assert_eq!(
+        backup.spec,
+        MonitorKind::Push(PushSpec {
+            schedule: None,
+            poll_secs: None
+        })
+    );
 }
 
 #[test]
@@ -2318,4 +2324,19 @@ fn compatibility_probe_fields_are_validated() {
     };
     assert_eq!((spec.ping_count, spec.packet_size), (3, 56));
     assert!(load(&ping.replace("ping_count=3", "ping_count=0")).is_err());
+}
+
+#[test]
+fn alert_policy_overrides_and_push_polling() {
+    let config = load(&format!(
+        "{MINIMAL}\nfail_threshold=1\nretry_interval_secs=10\nrepeat_alert_secs=3600"
+    ))
+    .unwrap();
+    assert_eq!(config.fail_threshold("web"), 1);
+    assert_eq!(config.monitors[0].repeat_alert_secs, Some(3600));
+    assert!(load(&format!("{MINIMAL}\nfail_threshold=0")).is_err());
+    assert!(load(&format!("{MINIMAL}\nretry_interval_secs=0")).is_err());
+    let config = load("[page]\n[server]\n[[monitors]]\nid='job'\nname='Job'\nkind='push'\ninterval_secs=93600\npush_poll_secs=30").unwrap();
+    assert_eq!(config.monitors[0].poll_interval().as_secs(), 30);
+    assert_eq!(config.monitors[0].interval_secs, 93600);
 }

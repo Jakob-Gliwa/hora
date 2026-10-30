@@ -38,6 +38,7 @@ use crate::notifications::Notifiers;
 #[derive(Debug)]
 pub enum AlertMsg {
     Down(DownAlert),
+    Repeat(DownAlert),
     Recovered {
         id: String,
         name: String,
@@ -164,6 +165,12 @@ impl Coalescer {
             .upstreams
             .iter()
             .any(|upstream| self.covered.contains_key(upstream.as_str()))
+    }
+
+    fn can_repeat(&self, id: &str) -> bool {
+        !self.suppressed.contains(id)
+            && !self.pending.iter().any(|p| p.alert.id == id)
+            && self.quiet.get(id).is_none_or(|q| q.confirmed)
     }
 
     /// Route a recovery to whoever received the down: folded downs recover
@@ -314,6 +321,11 @@ pub fn spawn(
                                 send_down(&notifier, &config, &alert).await;
                             }
                         }
+                        Some(AlertMsg::Repeat(alert)) => {
+                            if state.can_repeat(&alert.id) {
+                                send_down(&notifier, &config, &alert).await;
+                            }
+                        }
                         Some(AlertMsg::Recovered { id, name, notify }) => {
                             let recipients = state.on_recovered(&id, now);
                             send_recovered(&notifier, &config, &name, notify, recipients).await;
@@ -345,6 +357,12 @@ fn quiet_routes(config: &watch::Receiver<Arc<Config>>) -> Option<Vec<String>> {
 }
 
 async fn send_down(notifier: &Notifiers, config: &watch::Receiver<Arc<Config>>, alert: &DownAlert) {
+    if config
+        .borrow()
+        .in_maintenance(&alert.id, chrono::Utc::now())
+    {
+        return;
+    }
     let routes = if alert.local_only {
         let Some(quiet) = quiet_routes(config) else {
             info!(monitor = %alert.id, "down seen from this node only: recorded, not sent");
@@ -675,5 +693,16 @@ mod tests {
 
         shutdown_tx.send(true).unwrap();
         task.await.unwrap();
+    }
+
+    #[test]
+    fn alert_policy_reminders_do_not_bypass_grouping() {
+        let mut state = Coalescer::default();
+        assert!(state.on_down(down("db", &[]), 0, 30).is_some());
+        assert!(state.on_down(down("web", &["db"]), 0, 30).is_none());
+        assert!(state.can_repeat("db"));
+        assert!(!state.can_repeat("web"));
+        assert!(state.on_down(down("worker", &["queue"]), 0, 30).is_none());
+        assert!(!state.can_repeat("worker"));
     }
 }

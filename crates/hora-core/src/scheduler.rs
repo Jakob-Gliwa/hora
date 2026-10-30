@@ -66,6 +66,7 @@ pub(crate) struct AlertState {
     /// seconds. They are asked again every [`LOCAL_ONLY_REASK_SECS`] while
     /// the down lasts, until they confirm it.
     local_only_asked: Option<i64>,
+    last_down_alert: Option<i64>,
 }
 
 /// How often the peers are asked again about a local-only down.
@@ -106,7 +107,17 @@ impl AlertState {
         self.consecutive_down = 0;
         self.consecutive_degraded = 0;
         self.local_only_asked = None;
+        self.last_down_alert = None;
         self.level != AlertLevel::Healthy
+    }
+
+    fn repeat_due(&self, now: i64, seconds: u64) -> bool {
+        seconds != 0
+            && self.level == AlertLevel::Down
+            && self.local_only_asked.is_none()
+            && self.last_down_alert.is_some_and(|last| {
+                now.saturating_sub(last) >= i64::try_from(seconds).unwrap_or(i64::MAX)
+            })
     }
 
     /// Whether a local-only down is due for another round of peer questions.
@@ -219,9 +230,11 @@ async fn run(
     // every aligned tick forever. The offset is a stable hash of the id (same
     // phase across restarts), capped so a long-interval monitor still gets its
     // first check within a minute of starting.
-    let offset = stagger_offset(&monitor.id, monitor.interval());
-    let mut ticker =
-        tokio::time::interval_at(tokio::time::Instant::now() + offset, monitor.interval());
+    let offset = stagger_offset(&monitor.id, monitor.poll_interval());
+    let mut ticker = tokio::time::interval_at(
+        tokio::time::Instant::now() + offset,
+        monitor.poll_interval(),
+    );
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     // The exec directory comes from the environment (immutable for the process
     // lifetime), so one read outlives every config reload.
@@ -247,6 +260,18 @@ async fn run(
             None => AlertState::default(),
         },
     };
+    let repeat_key = format!("last-down-alert:{}", monitor.id);
+    if state.level == AlertLevel::Down && state.last_down_alert.is_none() {
+        state.last_down_alert = Some(
+            db::meta_get(&store, &repeat_key)
+                .await
+                .ok()
+                .flatten()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or_else(|| chrono::Utc::now().timestamp()),
+        );
+    }
+    let mut saved_alert = state.last_down_alert;
     alert_state.set(state);
     // Push monitors are judged from stored heartbeats against their cadence,
     // counted from the first heartbeat expected (persisted, so a monitor that
@@ -297,6 +322,14 @@ async fn run(
         }
 
         let (muted, threshold, alert_on_degraded) = alert_settings(&config, &monitor.id);
+        if let Some(retry) = monitor.retry_interval_secs {
+            let pending = !outcome.is_up() && state.consecutive_down.saturating_add(1) < threshold;
+            ticker.reset_after(if pending {
+                std::time::Duration::from_secs(retry)
+            } else {
+                monitor.poll_interval()
+            });
+        }
         // Ad-hoc silences (`hora silence`, POST /api/silence) mute exactly like
         // a maintenance window, read fresh each tick so they apply immediately.
         let muted = muted || silenced(&store, &monitor.id).await;
@@ -343,6 +376,7 @@ async fn run(
                 )
                 .await;
                 state.level = AlertLevel::Down;
+                state.last_down_alert = Some(chrono::Utc::now().timestamp());
                 state.local_only_asked = local_only.then(|| chrono::Utc::now().timestamp());
             } else if state.reask_due(chrono::Utc::now().timestamp()) {
                 let snapshot = config.borrow().clone();
@@ -358,6 +392,42 @@ async fn run(
                 )
                 .await;
                 state.local_only_asked = still_local.then(|| chrono::Utc::now().timestamp());
+                if !still_local {
+                    state.last_down_alert = Some(chrono::Utc::now().timestamp());
+                }
+            } else {
+                let snapshot = config.borrow().clone();
+                let repeat = monitor
+                    .repeat_alert_secs
+                    .unwrap_or(snapshot.alerts.repeat_alert_secs);
+                let now = chrono::Utc::now().timestamp();
+                if state.repeat_due(now, repeat) {
+                    let (cause, impacted) =
+                        down_context(&snapshot, &store, &monitor, threshold).await;
+                    send_alert(
+                        &alerts,
+                        &monitor.id,
+                        AlertMsg::Repeat(DownAlert {
+                            id: monitor.id.clone(),
+                            name: monitor.name.clone(),
+                            error: outcome.error.clone(),
+                            upstreams: topology::transitive_upstreams(
+                                &snapshot.monitors,
+                                &monitor.id,
+                            )
+                            .into_iter()
+                            .map(str::to_owned)
+                            .collect(),
+                            cause_name: cause.map(|(_, name)| name),
+                            impacted,
+                            notify: monitor.notify.clone(),
+                            vantage: None,
+                            event: None,
+                            local_only: false,
+                        }),
+                    );
+                    state.last_down_alert = Some(now);
+                }
             }
         } else if outcome.is_degraded() && alert_on_degraded {
             // Up but slow: same anti-flap threshold as down, separate state.
@@ -385,6 +455,14 @@ async fn run(
         // Written back right after the side effect, with no `.await` in
         // between: see [`AlertCell`].
         alert_state.set(state);
+        if state.last_down_alert != saved_alert {
+            if let Some(at) = state.last_down_alert {
+                if let Err(err) = db::meta_set(&store, &repeat_key, &at.to_string()).await {
+                    warn!(monitor = %monitor.id, "could not persist reminder time: {err}");
+                }
+            }
+            saved_alert = state.last_down_alert;
+        }
     }
 }
 
@@ -611,7 +689,7 @@ fn alert_settings(config: &watch::Receiver<Arc<Config>>, monitor_id: &str) -> (b
     let snapshot = config.borrow();
     (
         snapshot.in_maintenance(monitor_id, chrono::Utc::now()),
-        snapshot.alerts.fail_threshold.max(1),
+        snapshot.fail_threshold(monitor_id),
         snapshot.alerts.alert_on_degraded,
     )
 }
@@ -830,12 +908,11 @@ async fn down_context(
     config: &Config,
     store: &Store,
     monitor: &Monitor,
-    threshold: u32,
+    _threshold: u32,
 ) -> (Option<(String, String)>, Vec<String>) {
-    let threshold_i64 = i64::from(threshold.max(1));
-
     let upstreams = topology::transitive_upstreams(&config.monitors, &monitor.id);
     for up_id in &upstreams {
+        let threshold_i64 = i64::from(config.fail_threshold(up_id));
         let Ok(recent) = db::recent_checks(store, up_id, threshold_i64).await else {
             continue;
         };
@@ -1130,5 +1207,23 @@ mod tests {
             None
         );
         task.abort();
+    }
+
+    #[test]
+    fn alert_policy_repeat_clock_obeys_disabled_recovery_and_maintenance() {
+        let mut state = AlertState::resumed_down(2);
+        state.last_down_alert = Some(100);
+        assert!(!state.repeat_due(159, 60));
+        assert!(state.repeat_due(160, 60));
+        assert!(!state.repeat_due(1000, 0));
+        // A maintenance tick leaves the clock untouched and dispatch is skipped.
+        // Once unmuted, one reminder is due, never a catch-up burst.
+        assert!(state.repeat_due(200, 60));
+        state.last_down_alert = Some(200);
+        assert!(!state.repeat_due(200, 60));
+        state.local_only_asked = Some(200);
+        assert!(!state.repeat_due(1000, 60));
+        state.observe_up();
+        assert!(!state.repeat_due(1000, 60));
     }
 }

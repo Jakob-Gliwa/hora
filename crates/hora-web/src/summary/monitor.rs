@@ -87,7 +87,10 @@ pub(crate) fn build_monitor_view(
         .get(&monitor.id)
         .map(Vec::as_slice)
         .unwrap_or_default();
-    let status = db::derive_status(recent, ctx.threshold);
+    let status = db::derive_status(
+        recent,
+        monitor.fail_threshold.map_or(ctx.threshold, i64::from),
+    );
 
     let uptime_permille = data
         .availability

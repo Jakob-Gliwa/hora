@@ -86,6 +86,14 @@ impl Config {
         self.monitors.iter().find(|monitor| monitor.id == id)
     }
 
+    #[must_use]
+    pub fn fail_threshold(&self, id: &str) -> u32 {
+        self.find_monitor(id)
+            .map_or(self.alerts.fail_threshold.max(1), |m| {
+                m.fail_threshold(self.alerts.fail_threshold)
+            })
+    }
+
     /// A monitor's display name, falling back to its id (a monitor removed
     /// from the config after its incidents or alerts were recorded).
     #[must_use]
@@ -355,6 +363,9 @@ pub struct Alerts {
     /// Consecutive failed checks before a monitor is alerted as down.
     #[serde(default = "default_threshold")]
     pub fail_threshold: u32,
+    /// Periodic DOWN reminders; 0 disables them.
+    #[serde(default)]
+    pub repeat_alert_secs: u64,
     /// Also alert when a monitor is *degraded* - up, but slower than its
     /// `degraded_over_ms` - not only when it is down. Uses the same
     /// `fail_threshold` (consecutive degraded checks). Off by default.
@@ -403,6 +414,7 @@ impl Default for Alerts {
     fn default() -> Self {
         Self {
             fail_threshold: default_threshold(),
+            repeat_alert_secs: 0,
             alert_on_degraded: false,
             cert_expiry_days: default_cert_expiry_days(),
             domain_expiry_days: default_domain_expiry_days(),

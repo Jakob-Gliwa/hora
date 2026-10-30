@@ -46,6 +46,9 @@ pub(crate) fn monitor_from_raw(mut raw: RawMonitor) -> anyhow::Result<Monitor> {
         slo_uptime: raw.slo_uptime,
         slo_window_days: raw.slo_window_days,
         probe_retries: raw.probe_retries,
+        fail_threshold: raw.fail_threshold,
+        retry_interval_secs: raw.retry_interval_secs,
+        repeat_alert_secs: raw.repeat_alert_secs,
         notify: raw.notify,
         check_cert: raw.check_cert,
         retention_days: raw.retention_days,
@@ -142,6 +145,7 @@ fn spec_of(raw: &mut RawMonitor) -> anyhow::Result<MonitorKind> {
             },
         }),
         Kind::Push => MonitorKind::Push(PushSpec {
+            poll_secs: raw.push_poll_secs,
             schedule: match raw.schedule.take() {
                 Some(schedule) => Some(PushSchedule {
                     cron: Parsed::<croner::Cron>::new(schedule)
@@ -371,6 +375,25 @@ fn validate_monitor_io(monitor: &RawMonitor) -> anyhow::Result<()> {
     validate_pins(monitor)?;
     if monitor.dual_stack.unwrap_or(false) {
         validate_dual_stack(monitor)?;
+    }
+    anyhow::ensure!(
+        monitor
+            .fail_threshold
+            .is_none_or(|n| (1..=1000).contains(&n)),
+        "fail_threshold must be 1..1000"
+    );
+    if let Some(secs) = monitor.retry_interval_secs {
+        super::validate_period("retry_interval_secs", secs)?;
+    }
+    if let Some(secs) = monitor.repeat_alert_secs.filter(|s| *s != 0) {
+        super::validate_period("repeat_alert_secs", secs)?;
+    }
+    if let Some(secs) = monitor.push_poll_secs {
+        super::validate_period("push_poll_secs", secs)?;
+        anyhow::ensure!(
+            monitor.kind == Kind::Push && secs <= monitor.interval_secs,
+            "push_poll_secs requires push and must not exceed interval_secs"
+        );
     }
     validate_schedule_and_slo(monitor)?;
     Ok(())

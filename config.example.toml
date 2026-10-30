@@ -462,3 +462,9 @@ interval_secs = 90000        # max gap before "down" (~25h for a daily job)
 # timezone = "Europe/Berlin"       # default UTC; IANA timezone, DST aware
 # duration_secs = 900
 # monitors = ["website"]
+
+# Alert overrides inside [[monitors]]:
+# fail_threshold = 2             # consecutive recorded failures, overrides global
+# retry_interval_secs = 10       # delay while failures await confirmation
+# repeat_alert_secs = 21600      # DOWN reminder; 0 disables (also in [alerts])
+# push_poll_secs = 30            # push only: evaluate a long heartbeat deadline often

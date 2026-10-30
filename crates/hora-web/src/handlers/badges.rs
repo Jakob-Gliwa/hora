@@ -84,7 +84,7 @@ pub(crate) async fn status_badge(
     // not pay for, or wait on, a full status-page rebuild.
     let config = state.config.borrow().clone();
     badge_monitor(&config, &id)?;
-    let threshold = i64::from(config.alerts.fail_threshold.max(1));
+    let threshold = i64::from(config.fail_threshold(&id));
     let recent = db::recent_checks(&state.store, &id, threshold).await?;
     let status = db::derive_status(&recent, threshold).as_str();
     Ok(svg_response(badge(
