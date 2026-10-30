@@ -116,6 +116,10 @@ rate_limit_burst = 30
 # type = "pushover"                # Pushover notifications
 # token = "${PUSHOVER_TOKEN}"      # application API token
 # user = "${PUSHOVER_USER}"        # user key (recipient)
+# priority = 0                    # optional -2..2; unset = event-based
+# sound = "none"                  # optional sound override
+# retry = 60                      # priority 2 only, minimum 30 seconds
+# expire = 1800                   # priority 2 only, 1..10800 seconds
 
 # Alerting and retention policy, independent of any channel.
 [alerts]

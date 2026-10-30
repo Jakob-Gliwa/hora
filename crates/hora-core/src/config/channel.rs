@@ -82,6 +82,8 @@ pub enum Channel {
         token: Secret,
         /// Pushover user key (recipient).
         user: Secret,
+        #[serde(flatten)]
+        options: hora_notify::pushover::PushoverOptions,
     },
 }
 

@@ -2268,3 +2268,17 @@ fn page_logo_is_read_next_to_the_config() {
 
     std::fs::remove_dir_all(&dir).unwrap();
 }
+
+#[test]
+fn pushover_channel_options_are_validated() {
+    let channel =
+        "\n[[channels]]\nname='pager'\ntype='pushover'\ntoken='test-token'\nuser='test-user'\n";
+    assert!(load(&format!("{MINIMAL}{channel}priority=-1\nsound='none'")).is_ok());
+    assert!(load(&format!("{MINIMAL}{channel}priority=2")).is_err());
+    assert!(
+        load(&format!(
+            "{MINIMAL}{channel}priority=2\nretry=30\nexpire=600"
+        ))
+        .is_ok()
+    );
+}

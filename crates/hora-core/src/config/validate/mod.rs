@@ -250,6 +250,9 @@ fn validate_digest(
 fn validate_channels(config: &Config) -> anyhow::Result<HashSet<&str>> {
     let mut channel_names = HashSet::new();
     for channel in &config.channels {
+        if let Channel::Pushover { options, .. } = channel {
+            options.validate()?;
+        }
         anyhow::ensure!(!channel.name().is_empty(), "channel name must not be empty");
         anyhow::ensure!(
             channel_names.insert(channel.name()),
