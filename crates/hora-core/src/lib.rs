@@ -1,6 +1,7 @@
 //! Core of Hora: configuration, probing, storage, TLS-expiry and scheduling.
 
 pub mod announce;
+pub mod assertion;
 pub mod cert;
 pub mod coalesce;
 pub mod config;

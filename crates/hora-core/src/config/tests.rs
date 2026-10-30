@@ -2282,3 +2282,15 @@ fn pushover_channel_options_are_validated() {
         .is_ok()
     );
 }
+
+#[test]
+fn jq_is_compiled_at_load_and_options_require_an_expression() {
+    assert!(load(&format!("{MINIMAL}\njq='('")).is_err());
+    assert!(load(&format!("{MINIMAL}\njq_expected='true'")).is_err());
+    assert!(
+        load(&format!(
+            "{MINIMAL}\njq='.value | tonumber'\njq_operator='>='\njq_expected='2'"
+        ))
+        .is_ok()
+    );
+}

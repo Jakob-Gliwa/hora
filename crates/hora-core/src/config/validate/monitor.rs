@@ -87,6 +87,14 @@ fn spec_of(raw: &mut RawMonitor) -> anyhow::Result<MonitorKind> {
                 }),
                 None => None,
             },
+            jq: match raw.jq.take() {
+                Some(query) => Some(crate::assertion::JqAssert {
+                    query: query.compiled().ok_or_else(|| compiled("jq"))?,
+                    expected: raw.jq_expected.take(),
+                    operator: raw.jq_operator,
+                }),
+                None => None,
+            },
             number: match raw.number_regex.take() {
                 Some(regex) => Some(NumberAssert {
                     regex: regex.compiled().ok_or_else(|| compiled("number_regex"))?,
@@ -292,6 +300,7 @@ fn validate_monitor_io(monitor: &RawMonitor) -> anyhow::Result<()> {
         monitor.kind == Kind::Http
             || (monitor.keyword.is_none()
                 && monitor.json_query.is_none()
+                && monitor.jq.is_none()
                 && monitor.number_regex.is_none()
                 && monitor.proxy.is_none()),
         "monitor {}: keyword/json_query/number_regex/proxy require an http monitor",
@@ -325,6 +334,15 @@ fn validate_monitor_io(monitor: &RawMonitor) -> anyhow::Result<()> {
 /// compile, and the number bounds only make sense with a regex to extract the
 /// number and in min <= max order.
 fn validate_body_assertions(monitor: &RawMonitor) -> anyhow::Result<()> {
+    if let Some(err) = monitor.jq.as_ref().and_then(Parsed::error) {
+        anyhow::bail!("monitor {}: invalid jq: {err}", monitor.id);
+    }
+    anyhow::ensure!(
+        monitor.jq.is_some()
+            || (monitor.jq_expected.is_none()
+                && monitor.jq_operator == crate::assertion::Comparison::Eq),
+        "jq_expected/jq_operator require jq"
+    );
     if let Some(err) = monitor.json_query.as_ref().and_then(Parsed::error) {
         anyhow::bail!("monitor {}: invalid json_query: {err}", monitor.id);
     }

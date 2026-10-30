@@ -60,6 +60,12 @@ pub(crate) struct RawMonitor {
     /// When unset, the query only has to match at least one node.
     #[serde(default)]
     pub(crate) json_expected: Option<String>,
+    #[serde(default)]
+    pub(crate) jq: Option<Parsed<crate::assertion::JqProgram>>,
+    #[serde(default)]
+    pub(crate) jq_expected: Option<String>,
+    #[serde(default)]
+    pub(crate) jq_operator: crate::assertion::Comparison,
     /// HTTP body assertion: a regex extracting a number from the response body -
     /// the first capture group when the pattern has one, the whole match
     /// otherwise. Fails when nothing matches, the extracted text is not a
@@ -225,6 +231,9 @@ impl Default for RawMonitor {
             keyword_invert: false,
             json_query: None,
             json_expected: None,
+            jq: None,
+            jq_expected: None,
+            jq_operator: crate::assertion::Comparison::default(),
             number_regex: None,
             number_min: None,
             number_max: None,

@@ -233,6 +233,11 @@ pub(super) fn check_assertions(spec: &HttpSpec, body: &[u8]) -> Option<String> {
     {
         return Some(failure);
     }
+    if let Some(jq) = &spec.jq
+        && let Some(failure) = jq.check(body)
+    {
+        return Some(failure);
+    }
     if let Some(number) = &spec.number {
         return check_number(number, &text);
     }

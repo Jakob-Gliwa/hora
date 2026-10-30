@@ -707,3 +707,21 @@ fn public_reason_collapses_dual_stack_detail() {
         "IPv4 and IPv6 failing"
     );
 }
+
+#[tokio::test]
+async fn jq_http_assertions_evaluate_the_response_body() {
+    let (url, _) = serve(
+        "HTTP/1.1 200 OK\r\nContent-Length: 13\r\nConnection: close\r\n\r\n{\"value\":\"5\"}",
+    )
+    .await;
+    let client = crate::http::probe_client(None).unwrap();
+    let mut monitor = http_monitor(&url);
+    spec_mut(&mut monitor).jq = Some(crate::assertion::JqAssert {
+        query: crate::config::Compiled::parse(".value | tonumber").unwrap(),
+        expected: Some("4".into()),
+        operator: crate::assertion::Comparison::Gt,
+    });
+    assert!(http(&client, &monitor, spec(&monitor)).await.is_up());
+    spec_mut(&mut monitor).jq.as_mut().unwrap().expected = Some("6".into());
+    assert!(!http(&client, &monitor, spec(&monitor)).await.is_up());
+}

@@ -289,6 +289,9 @@ depends_on = ["database"]
 # Body assertions (http only):
 # keyword = "operational"   # body must contain this (keyword_invert = true → must NOT)
 # json_query = "$.status"   # JSONPath (RFC 9535) evaluated against a JSON body
+# jq = ".data.value | tonumber"  # compiled jq (jaq), HTTP and MQTT
+# jq_expected = "10"             # unset = true; exactly one non-null scalar
+# jq_operator = ">="             # == (default), !=, <, <=, >, >=
 # json_expected = "ok"      # the queried value must equal this (omit = must match a node)
 # number_regex = 'ships">(\d+)<'  # extract a number from the body (first capture group,
 #                                 # or the whole match) - down when nothing matches
