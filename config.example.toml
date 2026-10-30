@@ -468,3 +468,4 @@ interval_secs = 90000        # max gap before "down" (~25h for a daily job)
 # retry_interval_secs = 10       # delay while failures await confirmation
 # repeat_alert_secs = 21600      # DOWN reminder; 0 disables (also in [alerts])
 # push_poll_secs = 30            # push only: evaluate a long heartbeat deadline often
+# kuma_push = true               # push only: GET/POST /api/push/<push_token>

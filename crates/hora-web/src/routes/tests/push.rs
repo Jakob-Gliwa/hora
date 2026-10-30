@@ -418,3 +418,54 @@ async fn alert_history_respects_public_and_private_visibility() {
         "{full}"
     );
 }
+
+#[tokio::test]
+async fn kuma_push_get_post_tokens_fractional_ping_and_body() {
+    let store = hora_core::db::Store::in_memory().await;
+    let config = Arc::new(hora_core::config::parse("[page]\n[server]\n[[monitors]]\nid='job'\nname='Job'\nkind='push'\ninterval_secs=60\nkuma_push=true\npush_token='synthetic-credential'").unwrap());
+    let client = hora_core::http::client(None).unwrap();
+    let notifier = hora_core::notifications::shared(&config, &client);
+    let (_tx, rx) = watch::channel(config);
+    let app = router(AppState::new(
+        store.clone(),
+        rx,
+        Arc::new(AtomicU64::new(0)),
+        notifier,
+    ));
+    for method in ["GET", "POST"] {
+        let req = axum::http::Request::builder()
+            .method(method)
+            .uri("/api/push/synthetic-credential?status=down&msg=failed&ping=12.5")
+            .extension(fake_peer())
+            .body(Body::from("producer body is optional"))
+            .unwrap();
+        let response = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()["cache-control"], "no-store");
+        let bytes = axum::body::to_bytes(response.into_body(), 1024)
+            .await
+            .unwrap();
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&bytes).unwrap()["ok"],
+            true
+        );
+    }
+    let checks = hora_core::db::recent_checks(&store, "job", 10)
+        .await
+        .unwrap();
+    assert!(!checks.is_empty());
+    assert_eq!(checks[0].status, hora_core::status::CheckStatus::Down);
+    assert_eq!(checks[0].latency_ms, Some(12));
+    for token in ["wrong", "job"] {
+        let response = app
+            .clone()
+            .oneshot(get(&format!("/api/push/{token}")))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+    assert_eq!(
+        super::super::logged_path("/api/push/secret"),
+        "/api/push/[redacted]"
+    );
+}

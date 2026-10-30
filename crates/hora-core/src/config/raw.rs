@@ -111,6 +111,8 @@ pub(crate) struct RawMonitor {
     pub(crate) repeat_alert_secs: Option<u64>,
     #[serde(default)]
     pub(crate) push_poll_secs: Option<u64>,
+    #[serde(default)]
+    pub(crate) kuma_push: bool,
     /// Probe both address families and require both to pass - the classic
     /// silent failure is a service whose IPv6 has been dead for weeks behind a
     /// healthy IPv4. One broken family marks the monitor down, naming it in
@@ -266,6 +268,7 @@ impl Default for RawMonitor {
             retry_interval_secs: None,
             repeat_alert_secs: None,
             push_poll_secs: None,
+            kuma_push: false,
             dual_stack: None,
             notify: None,
             proxy: None,

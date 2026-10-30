@@ -2071,7 +2071,8 @@ fn the_example_config_round_trips_into_typed_monitors() {
         backup.spec,
         MonitorKind::Push(PushSpec {
             schedule: None,
-            poll_secs: None
+            poll_secs: None,
+            kuma_compatible: false
         })
     );
 }
@@ -2339,4 +2340,14 @@ fn alert_policy_overrides_and_push_polling() {
     let config = load("[page]\n[server]\n[[monitors]]\nid='job'\nname='Job'\nkind='push'\ninterval_secs=93600\npush_poll_secs=30").unwrap();
     assert_eq!(config.monitors[0].poll_interval().as_secs(), 30);
     assert_eq!(config.monitors[0].interval_secs, 93600);
+}
+
+#[test]
+fn kuma_push_requires_unique_nonempty_noncolliding_tokens() {
+    let base = "[page]\n[server]\n[[monitors]]\nid='job'\nname='Job'\nkind='push'\ninterval_secs=60\nkuma_push=true\n";
+    assert!(load(base).is_err());
+    assert!(load(&format!("{base}push_token=''")).is_err());
+    assert!(load(&format!("{base}push_token='job'")).is_err());
+    assert!(load(&format!("{base}push_token='synthetic-credential'")).is_ok());
+    assert!(load(&format!("{base}push_token='synthetic-credential'\n[[monitors]]\nid='job2'\nname='Job2'\nkind='push'\ninterval_secs=60\nkuma_push=true\npush_token='synthetic-credential'" )).is_err());
 }

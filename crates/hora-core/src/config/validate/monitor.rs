@@ -146,6 +146,7 @@ fn spec_of(raw: &mut RawMonitor) -> anyhow::Result<MonitorKind> {
         }),
         Kind::Push => MonitorKind::Push(PushSpec {
             poll_secs: raw.push_poll_secs,
+            kuma_compatible: raw.kuma_push,
             schedule: match raw.schedule.take() {
                 Some(schedule) => Some(PushSchedule {
                     cron: Parsed::<croner::Cron>::new(schedule)
@@ -395,6 +396,10 @@ fn validate_monitor_io(monitor: &RawMonitor) -> anyhow::Result<()> {
             "push_poll_secs requires push and must not exceed interval_secs"
         );
     }
+    anyhow::ensure!(
+        !monitor.kuma_push || (monitor.kind == Kind::Push && monitor.push_token.is_some()),
+        "kuma_push requires a push monitor with push_token"
+    );
     validate_schedule_and_slo(monitor)?;
     Ok(())
 }

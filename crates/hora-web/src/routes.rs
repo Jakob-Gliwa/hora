@@ -55,7 +55,7 @@ pub fn router(state: AppState) -> Router {
     // `deprecate_query_token`); the read-only views keep it first-class.
     let writes = Router::new()
         .route("/api/monitors/{id}/alert", post(post_alert))
-        .route("/api/push/{id}", post(push))
+        .route("/api/push/{id}", post(push).get(push))
         .route("/api/silence", post(silence))
         .route("/api/announce", post(announce).delete(announce_clear))
         .route("/api/event", post(post_event))
@@ -148,7 +148,8 @@ pub fn router(state: AppState) -> Router {
 /// front of Hora nor the browser's disk cache keeps it (nothing else sets a
 /// `Cache-Control` on the pages, so heuristic caching would apply).
 pub(crate) async fn no_store_with_credentials(request: Request<Body>, next: Next) -> Response {
-    let credentialed = request.headers().contains_key(header::AUTHORIZATION)
+    let credentialed = request.uri().path().starts_with("/api/push/")
+        || request.headers().contains_key(header::AUTHORIZATION)
         || request
             .headers()
             .contains_key(crate::auth::PUSH_TOKEN_HEADER)
@@ -290,6 +291,14 @@ impl ClassifyResponse for StartingIsNoFailure {
     }
 }
 
+fn logged_path(path: &str) -> &str {
+    if path.starts_with("/api/push/") {
+        "/api/push/[redacted]"
+    } else {
+        path
+    }
+}
+
 pub(crate) fn make_request_span(request: &Request<Body>) -> tracing::Span {
     let request_id = request
         .headers()
@@ -301,7 +310,7 @@ pub(crate) fn make_request_span(request: &Request<Body>) -> tracing::Span {
     tracing::info_span!(
         "request",
         method = %request.method(),
-        path = %request.uri().path(),
+        path = %logged_path(request.uri().path()),
         request_id,
     )
 }

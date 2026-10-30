@@ -2,11 +2,12 @@
 
 use axum::Json;
 use axum::extract::{Path, Query, State};
-use axum::http::{HeaderMap, StatusCode};
+use axum::http::{HeaderMap, Method, StatusCode};
+use axum::response::{IntoResponse, Response};
 use chrono::Utc;
 use serde::Deserialize;
 
-use hora_core::config::{Kind, Monitor};
+use hora_core::config::{Kind, Monitor, MonitorKind};
 use hora_core::db::{self};
 use hora_core::notifications::{AlertSeverity, Event};
 use hora_core::status::CheckStatus;
@@ -26,7 +27,7 @@ pub(crate) struct PushQuery {
     #[serde(default)]
     msg: Option<String>,
     #[serde(default)]
-    ping: Option<i64>,
+    ping: Option<String>,
 }
 
 #[utoipa::path(
@@ -52,8 +53,22 @@ pub(crate) async fn push(
     query_auth: QueryTokenAuth,
     Query(query): Query<PushQuery>,
     headers: HeaderMap,
-) -> Result<&'static str, AppError> {
+    method: Method,
+) -> Result<Response, AppError> {
     let config = state.config.borrow().clone();
+    // Kuma embeds the credential in the path; map it to the internal ID.
+    let compatible = config.monitors.iter().find(|monitor| {
+        matches!(&monitor.spec, MonitorKind::Push(push) if push.kuma_compatible)
+            && monitor
+                .push_token
+                .as_ref()
+                .is_some_and(|token| ct_eq(&id, token.as_ref()))
+    });
+    if method == Method::GET && compatible.is_none() {
+        return Err(AppError::Unauthorized("invalid push token"));
+    }
+    let is_kuma = compatible.is_some();
+    let id = compatible.map_or(id.as_str(), |monitor| monitor.id.as_str());
     // A push id is either a push monitor or a watched peer's listen id (peers
     // heartbeat the same endpoint); the expected token comes from whichever matches.
     let expected_token = if let Some(monitor) = config
@@ -72,13 +87,13 @@ pub(crate) async fn push(
         // The same 401 as a wrong token: a 404 here would tell anyone which
         // push ids exist (and so which ones to try tokens on). The operator
         // finds a typo'd id in the log.
-        tracing::debug!(id = %hora_core::bounded(&id, 64), "push for an unknown id");
+        tracing::debug!("push for an unknown id or token");
         return Err(AppError::Unauthorized("invalid push token"));
     };
 
     // A configured token is required; without one, the id alone authorizes. Prefer
     // the `X-Push-Token` header (kept out of access logs) over the `?token=` query.
-    if let Some(expected) = expected_token {
+    if let Some(expected) = expected_token.filter(|_| !is_kuma) {
         let header = push_token(&headers);
         let provided = header.or(query.token.as_deref());
         if !provided.is_some_and(|token| ct_eq(token, expected.as_ref())) {
@@ -96,9 +111,7 @@ pub(crate) async fn push(
         Some(word) => CheckStatus::parse(word)
             .ok_or(AppError::BadRequest("status must be up, down or degraded"))?,
     };
-    if query.ping.is_some_and(|ping| ping < 0) {
-        return Err(AppError::BadRequest("ping must not be negative"));
-    }
+    let ping = parse_ping(query.ping.as_deref())?;
     // Bound the stored message so a buggy or hostile pusher can't bloat the DB.
     let msg = query.msg.as_deref().map(|msg| {
         hora_core::fmt::printable(msg)
@@ -106,8 +119,31 @@ pub(crate) async fn push(
             .take(MAX_PUSH_MSG_CHARS)
             .collect::<String>()
     });
-    db::insert_push(&state.store, &id, status, query.ping, msg.as_deref()).await?;
-    Ok("ok")
+    db::insert_push(&state.store, id, status, ping, msg.as_deref()).await?;
+    Ok(if is_kuma {
+        Json(serde_json::json!({"ok": true})).into_response()
+    } else {
+        "ok".into_response()
+    })
+}
+
+/// Kuma allows fractional milliseconds and an empty ping query.
+fn parse_ping(value: Option<&str>) -> Result<Option<i64>, AppError> {
+    let Some(value) = value.filter(|s| !s.is_empty()) else {
+        return Ok(None);
+    };
+    let value: f64 = value
+        .parse()
+        .map_err(|_| AppError::BadRequest("ping must be a non-negative finite number"))?;
+    if !value.is_finite() || value < 0.0 {
+        return Err(AppError::BadRequest(
+            "ping must be a non-negative finite number",
+        ));
+    }
+    format!("{value:.0}")
+        .parse()
+        .map(Some)
+        .map_err(|_| AppError::BadRequest("ping is too large"))
 }
 
 /// The JSON body of `POST /api/monitors/{id}/alert`. Every field is optional at

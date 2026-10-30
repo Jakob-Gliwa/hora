@@ -272,6 +272,7 @@ pub struct DnsSpec {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PushSpec {
     pub poll_secs: Option<u64>,
+    pub kuma_compatible: bool,
     /// Heartbeats expected per cron run rather than every interval.
     pub schedule: Option<PushSchedule>,
 }

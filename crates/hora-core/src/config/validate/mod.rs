@@ -162,6 +162,22 @@ pub(super) fn validate(config: &Config) -> anyhow::Result<()> {
         )?;
     }
 
+    let mut push_tokens = HashSet::new();
+    for monitor in &config.monitors {
+        if matches!(&monitor.spec, super::MonitorKind::Push(push) if push.kuma_compatible) {
+            let token = monitor
+                .push_token
+                .as_ref()
+                .expect("validated push token")
+                .as_ref();
+            anyhow::ensure!(is_url_safe_id(token), "Kuma push tokens must be URL-safe");
+            anyhow::ensure!(push_tokens.insert(token), "Kuma push tokens must be unique");
+            anyhow::ensure!(
+                !seen.contains(token) && !config.peers.iter().any(|p| p.listen_id() == token),
+                "Kuma push token must not collide with a monitor or peer ID"
+            );
+        }
+    }
     crate::topology::validate_dag(&config.monitors)?;
 
     validate_peers(config, &seen, &channel_names)?;
