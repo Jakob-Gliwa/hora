@@ -6,7 +6,9 @@
 
 mod channel;
 mod env;
+mod maintenance;
 mod monitor;
+pub use maintenance::Maintenance;
 mod parsed;
 mod peer;
 mod raw;
@@ -97,8 +99,7 @@ impl Config {
     #[must_use]
     pub fn active_maintenance(&self, monitor_id: &str, now: DateTime<Utc>) -> Option<&Maintenance> {
         self.maintenance.iter().find(|window| {
-            now >= window.start
-                && now <= window.end
+            window.active_span(now).is_some()
                 && (window.monitors.is_empty() || window.monitors.iter().any(|id| id == monitor_id))
         })
     }
@@ -155,20 +156,6 @@ fn default_true() -> bool {
 
 fn default_digest_schedule() -> String {
     "0 8 * * 1".to_owned()
-}
-
-/// A scheduled maintenance window: alerts for the affected monitors are muted
-/// between `start` and `end` (RFC 3339 timestamps, quoted in TOML).
-#[derive(Debug, Clone, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct Maintenance {
-    #[serde(default)]
-    pub title: String,
-    pub start: DateTime<Utc>,
-    pub end: DateTime<Utc>,
-    /// Monitors covered by the window; empty = all monitors.
-    #[serde(default)]
-    pub monitors: Vec<String>,
 }
 
 /// Severity of an [`Incident`] or an ad-hoc announcement, controlling its

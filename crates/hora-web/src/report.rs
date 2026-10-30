@@ -254,9 +254,9 @@ fn maintenance_days(month: &str, id: &str, windows: &[Maintenance]) -> Vec<u32> 
         .iter()
         .filter(|window| window.monitors.is_empty() || window.monitors.iter().any(|m| m == id))
     {
-        let mut day = window.start.date_naive();
-        while day <= window.end.date_naive() {
-            if day.year() == first.year() && day.month() == first.month() {
+        let mut day = first;
+        while day.year() == first.year() && day.month() == first.month() {
+            if window.touches_utc_day(day) {
                 days.push(day.day());
             }
             let Some(next) = day.succ_opt() else { break };

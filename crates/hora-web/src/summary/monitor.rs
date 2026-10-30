@@ -48,14 +48,12 @@ fn mark_maintenance(
         .iter()
         .filter(|window| window.monitors.is_empty() || window.monitors.iter().any(|m| m == id))
     {
-        // ISO dates compare as strings.
-        let first = window.start.format("%Y-%m-%d").to_string();
-        let last = window.end.format("%Y-%m-%d").to_string();
-        for cell in bar
-            .iter_mut()
-            .filter(|cell| cell.date >= first && cell.date <= last)
-        {
-            cell.maint = true;
+        for cell in bar.iter_mut() {
+            if chrono::NaiveDate::parse_from_str(&cell.date, "%Y-%m-%d")
+                .is_ok_and(|day| window.touches_utc_day(day))
+            {
+                cell.maint = true;
+            }
         }
     }
 }

@@ -463,14 +463,14 @@ fn active_windows(
     let mut windows: Vec<(DateTime<Utc>, DateTime<Utc>)> = config
         .maintenance
         .iter()
-        .filter(|window| now >= window.start && now <= window.end)
+        .filter(|window| window.active_span(now).is_some())
         .filter(|window| {
             summary
                 .maintenances
                 .iter()
                 .any(|shown| shown.reason == window.title)
         })
-        .map(|window| (window.start, window.end))
+        .filter_map(|window| window.active_span(now))
         .collect();
     windows.sort_by_key(|(_, end)| *end);
     windows
@@ -484,9 +484,13 @@ fn next_window(
     config
         .maintenance
         .iter()
-        .filter(|window| window.start > now && window.start <= now + chrono::TimeDelta::days(7))
-        .min_by_key(|window| window.start)
-        .map(|window| (window.start, window.end, window.title.as_str()))
+        .filter_map(|window| {
+            window
+                .next_span(now)
+                .map(|(start, end)| (start, end, window.title.as_str()))
+        })
+        .filter(|(start, _, _)| *start <= now + chrono::TimeDelta::days(7))
+        .min_by_key(|(start, _, _)| *start)
 }
 
 fn hero_window(start: DateTime<Utc>, end: DateTime<Utc>, now: DateTime<Utc>) -> Window {

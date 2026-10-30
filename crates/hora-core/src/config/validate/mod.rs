@@ -77,11 +77,13 @@ pub(super) fn validate(config: &Config) -> anyhow::Result<()> {
     let channel_names = validate_channels(config)?;
 
     for window in &config.maintenance {
-        anyhow::ensure!(
-            window.start < window.end,
-            "maintenance window {:?}: start must be before end",
-            window.title
-        );
+        window.validate()?;
+        for id in &window.monitors {
+            anyhow::ensure!(
+                config.find_monitor(id).is_some(),
+                "maintenance references unknown monitor {id}"
+            );
+        }
     }
 
     let mut seen = HashSet::new();

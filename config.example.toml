@@ -454,3 +454,11 @@ interval_secs = 90000        # max gap before "down" (~25h for a daily job)
 # HTTP: ignore_tls = true                  # explicit per-monitor TLS exception
 # ICMP: ping_count = 3                      # default 1, maximum 10
 # ICMP: packet_size = 56                    # default 16, maximum 4096 bytes
+
+# A recurring alternative to fixed maintenance timestamps:
+# [[maintenance]]
+# title = "Scheduled update"
+# cron = "0 3 * * 0"
+# timezone = "Europe/Berlin"       # default UTC; IANA timezone, DST aware
+# duration_secs = 900
+# monitors = ["website"]

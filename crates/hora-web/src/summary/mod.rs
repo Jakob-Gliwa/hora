@@ -434,7 +434,7 @@ fn build_maintenances(
     config
         .maintenance
         .iter()
-        .filter(|window| now >= window.start && now <= window.end)
+        .filter(|window| window.active_span(now).is_some())
         .filter(|window| {
             only_ids.is_none_or(|ids| {
                 window.monitors.is_empty()
