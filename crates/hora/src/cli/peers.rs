@@ -39,7 +39,9 @@ pub(crate) async fn peers(args: &[String]) -> Result<(), CliError> {
         .filter(|monitor| {
             !matches!(
                 monitor.kind(),
-                hora_core::config::Kind::Push | hora_core::config::Kind::Exec
+                hora_core::config::Kind::Push
+                    | hora_core::config::Kind::Exec
+                    | hora_core::config::Kind::Mqtt
             )
         })
         .map(|monitor| {

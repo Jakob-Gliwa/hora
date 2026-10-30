@@ -20,6 +20,12 @@ pub(crate) struct RawMonitor {
     pub(crate) name: String,
     #[serde(default)]
     pub(crate) kind: Kind,
+    #[serde(default)]
+    pub(crate) broker: Option<String>,
+    #[serde(default)]
+    pub(crate) topic: Option<String>,
+    #[serde(default)]
+    pub(crate) max_age_secs: Option<u64>,
     /// Probe target (URL for HTTP, `host:port` for TCP, host or IP for ICMP,
     /// hostname for DNS). Unused for push monitors.
     #[serde(default)]
@@ -238,6 +244,9 @@ impl Default for RawMonitor {
             id: String::new(),
             name: String::new(),
             kind: Kind::default(),
+            broker: None,
+            topic: None,
+            max_age_secs: None,
             target: String::new(),
             interval_secs: 60,
             timeout_secs: default_timeout(),

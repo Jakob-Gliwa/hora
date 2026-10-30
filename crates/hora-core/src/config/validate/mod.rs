@@ -78,6 +78,7 @@ pub(super) fn validate(config: &Config) -> anyhow::Result<()> {
         );
     }
     let channel_names = validate_channels(config)?;
+    crate::mqtt::validate(config)?;
 
     for window in &config.maintenance {
         window.validate()?;

@@ -29,7 +29,7 @@ pub(crate) fn monitor_from_raw(mut raw: RawMonitor) -> anyhow::Result<Monitor> {
         domain.make_ascii_lowercase();
     }
     anyhow::ensure!(
-        matches!(raw.kind, Kind::Push | Kind::Exec) || !raw.target.is_empty(),
+        matches!(raw.kind, Kind::Push | Kind::Exec | Kind::Mqtt) || !raw.target.is_empty(),
         "monitor {}: target must not be empty",
         raw.id
     );
@@ -114,6 +114,31 @@ fn spec_of(raw: &mut RawMonitor) -> anyhow::Result<MonitorKind> {
             proxy: raw.proxy.take(),
             dual_stack,
         }),
+        Kind::Mqtt => MonitorKind::Mqtt(crate::config::MqttSpec {
+            broker: raw.broker.take().ok_or_else(|| compiled("broker"))?,
+            topic: raw.topic.take().ok_or_else(|| compiled("topic"))?,
+            max_age_secs: raw.max_age_secs,
+            max_body_kb: raw.max_body_kb,
+            keyword: raw.keyword.take().map(|text| KeywordAssert {
+                text,
+                invert: raw.keyword_invert,
+            }),
+            json: match raw.json_query.take() {
+                Some(query) => Some(JsonAssert {
+                    query: query.compiled().ok_or_else(|| compiled("json_query"))?,
+                    expected: raw.json_expected.take(),
+                }),
+                None => None,
+            },
+            jq: match raw.jq.take() {
+                Some(query) => Some(crate::assertion::JqAssert {
+                    query: query.compiled().ok_or_else(|| compiled("jq"))?,
+                    expected: raw.jq_expected.take(),
+                    operator: raw.jq_operator,
+                }),
+                None => None,
+            },
+        }),
         Kind::Tcp => MonitorKind::Tcp(TcpSpec {
             target,
             starttls: match raw.starttls.as_deref() {
@@ -181,7 +206,7 @@ fn warn_ignored(raw: &RawMonitor) {
         ("headers", raw.kind != Kind::Http && !raw.headers.is_empty()),
         (
             "max_body_kb",
-            raw.kind != Kind::Http && raw.max_body_kb.is_some(),
+            !matches!(raw.kind, Kind::Http | Kind::Mqtt) && raw.max_body_kb.is_some(),
         ),
         (
             "keyword_invert",
@@ -260,6 +285,25 @@ fn validate_monitor_io(monitor: &RawMonitor) -> anyhow::Result<()> {
             );
         }
         Kind::Push => {}
+        Kind::Mqtt => {
+            anyhow::ensure!(
+                monitor.target.is_empty(),
+                "MQTT monitors use broker and topic, not target"
+            );
+            anyhow::ensure!(
+                monitor.broker.as_ref().is_some_and(|s| !s.is_empty()),
+                "MQTT monitor requires broker"
+            );
+            anyhow::ensure!(
+                monitor.topic.as_ref().is_some_and(|s| !s.is_empty()
+                    && s.len() <= 65535
+                    && !s.contains(['#', '+', '\0'])),
+                "MQTT requires a nonempty concrete topic without wildcards"
+            );
+            if let Some(secs) = monitor.max_age_secs {
+                super::validate_period("max_age_secs", secs)?;
+            }
+        }
         Kind::Exec => validate_exec_io(monitor)?,
         Kind::Dns => validate_dns_io(monitor)?,
     }
@@ -348,7 +392,7 @@ fn validate_monitor_io(monitor: &RawMonitor) -> anyhow::Result<()> {
         );
     }
     anyhow::ensure!(
-        monitor.kind == Kind::Http
+        matches!(monitor.kind, Kind::Http | Kind::Mqtt)
             || (monitor.keyword.is_none()
                 && monitor.json_query.is_none()
                 && monitor.jq.is_none()
@@ -356,6 +400,17 @@ fn validate_monitor_io(monitor: &RawMonitor) -> anyhow::Result<()> {
                 && monitor.proxy.is_none()),
         "monitor {}: keyword/json_query/number_regex/proxy require an http monitor",
         monitor.id
+    );
+    anyhow::ensure!(
+        monitor.kind == Kind::Http || (monitor.proxy.is_none() && monitor.number_regex.is_none()),
+        "proxy/number_regex require an http monitor"
+    );
+    anyhow::ensure!(
+        monitor.kind == Kind::Mqtt
+            || (monitor.broker.is_none()
+                && monitor.topic.is_none()
+                && monitor.max_age_secs.is_none()),
+        "broker/topic/max_age_secs require an mqtt monitor"
     );
     validate_body_assertions(monitor)?;
     if let Some(proxy) = &monitor.proxy {

@@ -229,15 +229,10 @@ pub(super) fn same_origin(target: &reqwest::Url, url: &reqwest::Url) -> bool {
 /// fails returns its reason. `None` means every assertion passed.
 pub(super) fn check_assertions(spec: &HttpSpec, body: &[u8]) -> Option<String> {
     let text = String::from_utf8_lossy(body);
-    if let Some(keyword) = &spec.keyword {
-        let found = text.contains(keyword.text.as_str());
-        if found == keyword.invert {
-            return Some(if keyword.invert {
-                format!("keyword present: {}", keyword.text)
-            } else {
-                format!("keyword missing: {}", keyword.text)
-            });
-        }
+    if let Some(keyword) = &spec.keyword
+        && let Some(failure) = crate::assertion::check_keyword(keyword, body)
+    {
+        return Some(failure);
     }
     if let Some(json) = &spec.json
         && let Some(failure) = check_json(json, &text)
@@ -288,7 +283,7 @@ pub(super) fn check_number(number: &NumberAssert, body: &str) -> Option<String> 
 }
 
 /// Evaluate a `JSONPath` against the body. Returns a failure reason or `None`.
-pub(super) fn check_json(json: &JsonAssert, body: &str) -> Option<String> {
+pub(crate) fn check_json(json: &JsonAssert, body: &str) -> Option<String> {
     let Ok(value) = serde_json::from_str::<serde_json::Value>(body) else {
         return Some("response is not valid JSON".to_owned());
     };

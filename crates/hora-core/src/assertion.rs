@@ -12,6 +12,18 @@ use serde::Deserialize;
 
 use crate::config::{Compiled, ParseField};
 
+/// Shared keyword semantics for HTTP bodies and MQTT payloads.
+pub(crate) fn check_keyword(keyword: &crate::config::KeywordAssert, body: &[u8]) -> Option<String> {
+    let found = String::from_utf8_lossy(body).contains(keyword.text.as_str());
+    (found == keyword.invert).then(|| {
+        if keyword.invert {
+            format!("keyword present: {}", keyword.text)
+        } else {
+            format!("keyword missing: {}", keyword.text)
+        }
+    })
+}
+
 type Filter = jaq_core::Filter<data::JustLut<Val>>;
 
 #[derive(Clone)]

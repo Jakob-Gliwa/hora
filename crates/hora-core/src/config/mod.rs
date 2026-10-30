@@ -20,7 +20,7 @@ mod validate;
 pub use channel::Channel;
 pub use monitor::{
     DnsSpec, ExecSpec, HttpSpec, IcmpSpec, JsonAssert, KeywordAssert, Kind, Monitor, MonitorKind,
-    NetworkProbe, NumberAssert, PushSchedule, PushSpec, ReleaseWatch, Starttls, TcpSpec,
+    MqttSpec, NetworkProbe, NumberAssert, PushSchedule, PushSpec, ReleaseWatch, Starttls, TcpSpec,
     split_host_port,
 };
 pub use parsed::{Compiled, DnsRecord, ParseField, Parsed};
@@ -45,6 +45,8 @@ pub struct Config {
     /// Named notification channels. Monitors route to them by name.
     #[serde(default)]
     pub channels: Vec<Channel>,
+    #[serde(default)]
+    pub brokers: Vec<crate::mqtt::Broker>,
     /// Scheduled maintenance windows that mute alerts.
     #[serde(default)]
     pub maintenance: Vec<Maintenance>,

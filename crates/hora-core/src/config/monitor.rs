@@ -41,6 +41,7 @@ pub enum Kind {
     /// DNS resolution: resolve a name and assert the expected record type/value.
     /// Target is a hostname; `dns_expected` pins the answer (hijack detection).
     Dns,
+    Mqtt,
 }
 
 impl Kind {
@@ -54,6 +55,7 @@ impl Kind {
             Self::Exec => "exec",
             Self::Push => "push",
             Self::Dns => "dns",
+            Self::Mqtt => "mqtt",
         }
     }
 }
@@ -165,6 +167,19 @@ pub enum MonitorKind {
     Dns(DnsSpec),
     Push(PushSpec),
     Exec(ExecSpec),
+    Mqtt(MqttSpec),
+}
+
+/// A cached MQTT topic check on a shared broker connection.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MqttSpec {
+    pub broker: String,
+    pub topic: String,
+    pub max_age_secs: Option<u64>,
+    pub keyword: Option<KeywordAssert>,
+    pub json: Option<JsonAssert>,
+    pub jq: Option<crate::assertion::JqAssert>,
+    pub max_body_kb: Option<u32>,
 }
 
 /// An HTTP(S) check.
@@ -315,6 +330,7 @@ impl MonitorKind {
             Self::Dns(_) => Kind::Dns,
             Self::Push(_) => Kind::Push,
             Self::Exec(_) => Kind::Exec,
+            Self::Mqtt(_) => Kind::Mqtt,
         }
     }
 
@@ -326,7 +342,7 @@ impl MonitorKind {
             Self::Tcp(spec) => Some(NetworkProbe::Tcp(spec)),
             Self::Icmp(spec) => Some(NetworkProbe::Icmp(spec)),
             Self::Dns(spec) => Some(NetworkProbe::Dns(spec)),
-            Self::Push(_) | Self::Exec(_) => None,
+            Self::Push(_) | Self::Exec(_) | Self::Mqtt(_) => None,
         }
     }
 }
@@ -436,7 +452,7 @@ impl Monitor {
             MonitorKind::Tcp(spec) => &spec.target,
             MonitorKind::Icmp(spec) => &spec.target,
             MonitorKind::Dns(spec) => &spec.target,
-            MonitorKind::Push(_) | MonitorKind::Exec(_) => "",
+            MonitorKind::Push(_) | MonitorKind::Exec(_) | MonitorKind::Mqtt(_) => "",
         }
     }
 
@@ -472,7 +488,10 @@ impl Monitor {
             MonitorKind::Http(spec) => spec.dual_stack,
             MonitorKind::Tcp(spec) => spec.dual_stack,
             MonitorKind::Icmp(spec) => spec.dual_stack,
-            MonitorKind::Dns(_) | MonitorKind::Push(_) | MonitorKind::Exec(_) => false,
+            MonitorKind::Dns(_)
+            | MonitorKind::Push(_)
+            | MonitorKind::Exec(_)
+            | MonitorKind::Mqtt(_) => false,
         }
     }
 

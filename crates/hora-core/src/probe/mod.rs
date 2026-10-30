@@ -26,6 +26,7 @@ use crate::status::CheckStatus;
 
 use dns::dns;
 use family::{DualStack, Family, dual_stack};
+pub(crate) use http::check_json;
 use http::http;
 use icmp::icmp;
 use tcp::tcp;

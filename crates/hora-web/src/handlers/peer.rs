@@ -37,7 +37,7 @@ pub(crate) async fn peer_probe(
     // Exec and push monitors have no network target: every exec monitor has
     // the same empty one, so matching it would run *some* local exec monitor
     // and answer its verdict (or a bogus "down") for another node's check.
-    if matches!(request.kind, Kind::Exec | Kind::Push) {
+    if matches!(request.kind, Kind::Exec | Kind::Push | Kind::Mqtt) {
         return Err(AppError::BadRequest(
             "exec and push monitors are not network probes",
         ));
@@ -138,7 +138,7 @@ pub(crate) async fn peer_monitors(
     let monitors = config
         .monitors
         .iter()
-        .filter(|monitor| !matches!(monitor.kind(), Kind::Push | Kind::Exec))
+        .filter(|monitor| !matches!(monitor.kind(), Kind::Push | Kind::Exec | Kind::Mqtt))
         .map(|monitor| {
             let view = views.get(monitor.id.as_str());
             hora_core::mesh::wire::PeerMonitor {

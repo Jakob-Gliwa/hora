@@ -156,6 +156,7 @@ impl AlertCell {
 /// (down/recovered alerts), the liveness beacon, and its alert state.
 pub struct MonitorDeps {
     pub store: Store,
+    pub mqtt: Arc<crate::mqtt::MqttHub>,
     pub client: Client,
     /// The shared plain client for multi-vantage confirmation requests to the
     /// peers. Distinct from `client` on purpose: that one may be bound to the
@@ -217,6 +218,7 @@ async fn run(
 ) {
     let MonitorDeps {
         store,
+        mqtt,
         client,
         confirm_client,
         notifier,
@@ -303,6 +305,7 @@ async fn run(
             &monitor,
             exec_dir.as_deref(),
             heartbeat.as_ref(),
+            &mqtt,
         )
         .await
         else {
@@ -742,6 +745,7 @@ async fn tick_outcome(
     monitor: &Monitor,
     exec_dir: Option<&std::path::Path>,
     heartbeat: Option<&HeartbeatWatch>,
+    mqtt: &crate::mqtt::MqttHub,
 ) -> Option<Outcome> {
     let outcome = match &monitor.spec {
         MonitorKind::Push(_) => {
@@ -764,6 +768,7 @@ async fn tick_outcome(
                 "HORA_EXEC_DIR is not set".to_owned(),
             ),
         },
+        MonitorKind::Mqtt(spec) => mqtt.outcome(spec),
         MonitorKind::Http(spec) => probe::run(client, monitor, NetworkProbe::Http(spec)).await,
         MonitorKind::Tcp(spec) => probe::run(client, monitor, NetworkProbe::Tcp(spec)).await,
         MonitorKind::Icmp(spec) => probe::run(client, monitor, NetworkProbe::Icmp(spec)).await,
@@ -1115,6 +1120,7 @@ mod tests {
             config.clone(),
             MonitorDeps {
                 store: store.clone(),
+                mqtt: Arc::default(),
                 client: client.clone(),
                 confirm_client: client.clone(),
                 notifier: crate::notifications::shared(&config.borrow(), &client),

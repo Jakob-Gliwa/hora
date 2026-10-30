@@ -7,3 +7,8 @@
 !Cargo.lock
 !crates/
 **/.DS_Store
+
+hora-fork-spec
+.local
+.env
+.env.*

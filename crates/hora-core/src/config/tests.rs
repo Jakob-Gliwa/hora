@@ -2351,3 +2351,23 @@ fn kuma_push_requires_unique_nonempty_noncolliding_tokens() {
     assert!(load(&format!("{base}push_token='synthetic-credential'")).is_ok());
     assert!(load(&format!("{base}push_token='synthetic-credential'\n[[monitors]]\nid='job2'\nname='Job2'\nkind='push'\ninterval_secs=60\nkuma_push=true\npush_token='synthetic-credential'" )).is_err());
 }
+
+#[test]
+fn mqtt_config_rejects_unbounded_topics_and_unknown_brokers() {
+    let prefix = "[page]\n[server]\n[[brokers]]\nname='test'\nurl='mqtt://localhost:1883'\n";
+    let monitor = "[[monitors]]\nid='sensor'\nname='Sensor'\nkind='mqtt'\nbroker='test'\ntopic='test/sensor'\ninterval_secs=60\njq='.value >= 0'\nmax_age_secs=120";
+    assert!(load(&format!("{prefix}{monitor}")).is_ok());
+    for bad in [
+        monitor.replace("test/sensor", "test/#"),
+        monitor.replace("broker='test'", "broker='missing'"),
+        monitor.replace("max_age_secs=120", "max_age_secs=0"),
+    ] {
+        assert!(load(&format!("{prefix}{bad}")).is_err());
+    }
+    assert!(
+        load(&format!(
+            "{prefix}{monitor}\n[[brokers]]\nname='alias'\nurl='mqtt://localhost:1883'"
+        ))
+        .is_err()
+    );
+}
