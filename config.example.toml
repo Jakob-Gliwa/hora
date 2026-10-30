@@ -447,3 +447,10 @@ interval_secs = 90000        # max gap before "down" (~25h for a daily job)
 # To be watched BY UptimeRobot instead: point an UptimeRobot keyword monitor at
 # this node's /healthz and match the keyword "ok" (the top-level "status" field is
 # "ok" only while the node is fully healthy). No peer entry needed for that.
+
+# Additional probe settings (put inside the relevant [[monitors]] table):
+# HTTP: expected_statuses = [200, 201, 302]  # alternative to expected_status
+# HTTP: method = "HEAD"                    # default GET
+# HTTP: ignore_tls = true                  # explicit per-monitor TLS exception
+# ICMP: ping_count = 3                      # default 1, maximum 10
+# ICMP: packet_size = 56                    # default 16, maximum 4096 bytes

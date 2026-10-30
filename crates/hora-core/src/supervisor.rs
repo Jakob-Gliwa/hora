@@ -309,7 +309,7 @@ fn reconcile(
     for monitor in &config.monitors {
         if !fleet.running.contains_key(&monitor.id) {
             // The proxy URL is validated at config load, so this rarely fails.
-            let client = match probe_clients.get(monitor.proxy()) {
+            let client = match probe_clients.get(monitor.proxy(), monitor.ignore_tls()) {
                 Ok(client) => client,
                 Err(err) => {
                     warn!(monitor = %monitor.id, "monitor not started, bad proxy: {err:#}");
@@ -349,17 +349,17 @@ fn reconcile(
 /// per monitor (credentials and timeouts are set per request).
 #[derive(Default)]
 struct ProbeClients {
-    clients: HashMap<Option<String>, Client>,
+    clients: HashMap<(Option<String>, bool), Client>,
 }
 
 impl ProbeClients {
     /// The client for `proxy`, built on first use.
-    fn get(&mut self, proxy: Option<&str>) -> reqwest::Result<Client> {
-        let key = proxy.map(str::to_owned);
+    fn get(&mut self, proxy: Option<&str>, ignore_tls: bool) -> reqwest::Result<Client> {
+        let key = (proxy.map(str::to_owned), ignore_tls);
         if let Some(client) = self.clients.get(&key) {
             return Ok(client.clone());
         }
-        let client = crate::http::probe_client(proxy)?;
+        let client = crate::http::probe_client_tls(proxy, ignore_tls)?;
         self.clients.insert(key, client.clone());
         Ok(client)
     }
@@ -367,12 +367,11 @@ impl ProbeClients {
     /// Forget the clients of proxies no monitor uses any more (running
     /// monitors keep their own handle on theirs until they restart).
     fn retain_used(&mut self, config: &Config) {
-        self.clients.retain(|proxy, _| {
+        self.clients.retain(|(proxy, ignore_tls), _| {
             proxy.is_none()
-                || config
-                    .monitors
-                    .iter()
-                    .any(|monitor| monitor.proxy() == proxy.as_deref())
+                || config.monitors.iter().any(|monitor| {
+                    monitor.proxy() == proxy.as_deref() && monitor.ignore_tls() == *ignore_tls
+                })
         });
     }
 }
@@ -501,10 +500,14 @@ mod tests {
     #[test]
     fn monitors_share_a_probe_client_per_proxy() {
         let mut clients = ProbeClients::default();
-        clients.get(None).unwrap();
-        clients.get(None).unwrap();
-        clients.get(Some("http://proxy.example:3128")).unwrap();
-        clients.get(Some("http://proxy.example:3128")).unwrap();
+        clients.get(None, false).unwrap();
+        clients.get(None, false).unwrap();
+        clients
+            .get(Some("http://proxy.example:3128"), false)
+            .unwrap();
+        clients
+            .get(Some("http://proxy.example:3128"), false)
+            .unwrap();
         assert_eq!(
             clients.clients.len(),
             2,
@@ -519,6 +522,6 @@ mod tests {
         .unwrap();
         clients.retain_used(&config);
         assert_eq!(clients.clients.len(), 1);
-        assert!(clients.clients.contains_key(&None));
+        assert!(clients.clients.contains_key(&(None, false)));
     }
 }

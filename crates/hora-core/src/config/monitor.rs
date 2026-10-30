@@ -173,6 +173,9 @@ pub struct HttpSpec {
     pub url: reqwest::Url,
     /// The status that counts as up; unset = any 2xx. A 3xx is not followed.
     pub expected_status: Option<u16>,
+    pub expected_statuses: Vec<u16>,
+    pub ignore_tls: bool,
+    pub method: reqwest::Method,
     /// Extra request headers; values may be credentials.
     pub headers: HashMap<String, Secret>,
     /// The body must (or, inverted, must not) contain this text.
@@ -242,6 +245,8 @@ pub enum Starttls {
 /// An ICMP echo check.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IcmpSpec {
+    pub ping_count: u16,
+    pub packet_size: u16,
     /// A bare host or IP.
     pub target: String,
     pub dual_stack: bool,
@@ -348,6 +353,9 @@ impl std::fmt::Debug for HttpSpec {
         f.debug_struct("HttpSpec")
             .field("target", &redact_url_secrets(&self.target))
             .field("expected_status", &self.expected_status)
+            .field("expected_statuses", &self.expected_statuses)
+            .field("ignore_tls", &self.ignore_tls)
+            .field("method", &self.method)
             .field("headers", &self.headers)
             .field("keyword", &self.keyword)
             .field("json", &self.json)
@@ -425,6 +433,12 @@ impl Monitor {
             MonitorKind::Dns(spec) => &spec.target,
             MonitorKind::Push(_) | MonitorKind::Exec(_) => "",
         }
+    }
+
+    /// Whether this monitor explicitly disables HTTPS certificate verification.
+    #[must_use]
+    pub fn ignore_tls(&self) -> bool {
+        matches!(&self.spec, MonitorKind::Http(spec) if spec.ignore_tls)
     }
 
     /// The HTTP proxy this monitor's requests go through, if any.

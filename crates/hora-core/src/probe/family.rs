@@ -89,7 +89,7 @@ async fn probe_family(monitor: &Monitor, probe: DualStack<'_>, family: Family) -
     match probe {
         // The per-monitor client cannot be steered per family, so dual-stack
         // probes share one family-bound client per family.
-        DualStack::Http(spec) => match family_client(family) {
+        DualStack::Http(spec) => match family_client(family, spec.ignore_tls) {
             Ok(client) => http(&client, monitor, spec).await,
             Err(err) => Outcome::down(
                 FailureKind::Other,
@@ -106,17 +106,21 @@ async fn probe_family(monitor: &Monitor, probe: DualStack<'_>, family: Family) -
 /// (headers go per request, dual-stack excludes proxies), and sharing keeps
 /// connection and TLS-session reuse - like the per-monitor client of a
 /// single-stack probe - instead of two fresh clients on every probe.
-fn family_client(family: Family) -> reqwest::Result<Client> {
+fn family_client(family: Family, ignore_tls: bool) -> reqwest::Result<Client> {
     static V4: OnceLock<Client> = OnceLock::new();
     static V6: OnceLock<Client> = OnceLock::new();
-    let cell = match family {
-        Family::V4 => &V4,
-        Family::V6 => &V6,
+    static V4_INSECURE: OnceLock<Client> = OnceLock::new();
+    static V6_INSECURE: OnceLock<Client> = OnceLock::new();
+    let cell = match (family, ignore_tls) {
+        (Family::V4, false) => &V4,
+        (Family::V6, false) => &V6,
+        (Family::V4, true) => &V4_INSECURE,
+        (Family::V6, true) => &V6_INSECURE,
     };
     if let Some(client) = cell.get() {
         return Ok(client.clone());
     }
-    let client = crate::http::probe_client_family(family.unspecified())?;
+    let client = crate::http::probe_client_family_tls(family.unspecified(), ignore_tls)?;
     Ok(cell.get_or_init(|| client).clone())
 }
 

@@ -2294,3 +2294,28 @@ fn jq_is_compiled_at_load_and_options_require_an_expression() {
         .is_ok()
     );
 }
+
+#[test]
+fn compatibility_probe_fields_are_validated() {
+    assert!(
+        load(&format!(
+            "{MINIMAL}\nexpected_status=200\nexpected_statuses=[201]"
+        ))
+        .is_err()
+    );
+    assert!(load(&format!("{MINIMAL}\nexpected_statuses=[600]")).is_err());
+    assert!(load(&format!("{MINIMAL}\nmethod='bad method'")).is_err());
+    let config = load(&format!(
+        "{MINIMAL}\nexpected_statuses=[200,201,302]\nignore_tls=true\nmethod='HEAD'"
+    ))
+    .unwrap();
+    assert!(config.monitors[0].ignore_tls());
+    assert_eq!(http_spec(&config.monitors[0]).method, reqwest::Method::HEAD);
+    let ping = "[page]\n[server]\n[[monitors]]\nid='ping'\nname='Ping'\nkind='icmp'\ntarget='192.0.2.1'\ninterval_secs=60\nping_count=3\npacket_size=56";
+    let config = load(ping).unwrap();
+    let MonitorKind::Icmp(spec) = &config.monitors[0].spec else {
+        panic!()
+    };
+    assert_eq!((spec.ping_count, spec.packet_size), (3, 56));
+    assert!(load(&ping.replace("ping_count=3", "ping_count=0")).is_err());
+}

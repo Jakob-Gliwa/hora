@@ -725,3 +725,22 @@ async fn jq_http_assertions_evaluate_the_response_body() {
     spec_mut(&mut monitor).jq.as_mut().unwrap().expected = Some("6".into());
     assert!(!http(&client, &monitor, spec(&monitor)).await.is_up());
 }
+
+#[tokio::test]
+async fn compatibility_status_sets_and_tls_policies() {
+    let (url, _) =
+        serve("HTTP/1.1 418 Teapot\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").await;
+    let client = crate::http::probe_client(None).unwrap();
+    let mut monitor = http_monitor(&url);
+    spec_mut(&mut monitor).expected_statuses = vec![200, 418];
+    assert!(http(&client, &monitor, spec(&monitor)).await.is_up());
+    spec_mut(&mut monitor).expected_statuses = vec![200, 204];
+    assert!(!http(&client, &monitor, spec(&monitor)).await.is_up());
+
+    let port = crate::testing::tls_server().await;
+    let monitor = http_monitor(&format!("https://127.0.0.1:{port}"));
+    assert!(!http(&client, &monitor, spec(&monitor)).await.is_up());
+    let insecure = crate::http::probe_client_tls(None, true).unwrap();
+    assert!(http(&insecure, &monitor, spec(&monitor)).await.is_up());
+    assert!(!http(&client, &monitor, spec(&monitor)).await.is_up());
+}

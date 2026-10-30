@@ -116,7 +116,7 @@ impl<C> Default for ProbeClients<C> {
 
 struct ProbeClientSet<C> {
     config: Arc<Config>,
-    clients: HashMap<Option<String>, C>,
+    clients: HashMap<(Option<String>, bool), C>,
 }
 
 impl<C: Clone> ProbeClients<C> {
@@ -126,7 +126,8 @@ impl<C: Clone> ProbeClients<C> {
         &self,
         config: &Arc<Config>,
         proxy: Option<&str>,
-        build: impl FnOnce(Option<&str>) -> Result<C, E>,
+        ignore_tls: bool,
+        build: impl FnOnce(Option<&str>, bool) -> Result<C, E>,
     ) -> Result<C, E> {
         let mut guard = self.inner.lock().unwrap_or_else(PoisonError::into_inner);
         let set = match guard.take() {
@@ -137,11 +138,11 @@ impl<C: Clone> ProbeClients<C> {
             },
         };
         let set = guard.insert(set);
-        let key = proxy.map(str::to_owned);
+        let key = (proxy.map(str::to_owned), ignore_tls);
         if let Some(client) = set.clients.get(&key) {
             return Ok(client.clone());
         }
-        let client = build(proxy)?;
+        let client = build(proxy, ignore_tls)?;
         set.clients.insert(key, client.clone());
         Ok(client)
     }
@@ -208,23 +209,25 @@ mod tests {
         let clients = ProbeClients::<String>::default();
         let config = config();
         let mut builds = 0;
-        let mut build = |proxy: Option<&str>| -> Result<String, ()> {
+        let mut build = |proxy: Option<&str>, _ignore_tls: bool| -> Result<String, ()> {
             builds += 1;
             Ok(format!("client:{proxy:?}"))
         };
         assert_eq!(
-            clients.get_or_build(&config, None, &mut build),
+            clients.get_or_build(&config, None, false, &mut build),
             Ok("client:None".to_owned())
         );
         assert_eq!(
-            clients.get_or_build(&config, None, &mut build),
+            clients.get_or_build(&config, None, false, &mut build),
             Ok("client:None".to_owned())
         );
         clients
-            .get_or_build(&config, Some("socks5://proxy:1080"), &mut build)
+            .get_or_build(&config, Some("socks5://proxy:1080"), false, &mut build)
             .unwrap();
         let reloaded = self::config();
-        clients.get_or_build(&reloaded, None, &mut build).unwrap();
+        clients
+            .get_or_build(&reloaded, None, false, &mut build)
+            .unwrap();
         assert_eq!(builds, 3, "one build per proxy, plus one after the reload");
     }
 }

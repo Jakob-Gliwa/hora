@@ -32,7 +32,7 @@ const OUTER_DEADLINE_SLACK: Duration = Duration::from_secs(2);
 ///
 /// Returns an error if the proxy URL is invalid or the client cannot be built.
 pub fn client(proxy: Option<&str>) -> reqwest::Result<Client> {
-    build(proxy, Policy::custom(same_origin_redirect), None)
+    build(proxy, Policy::custom(same_origin_redirect), None, false)
 }
 
 /// Like [`client`], but never auto-follows redirects: probes follow them
@@ -45,7 +45,7 @@ pub fn client(proxy: Option<&str>) -> reqwest::Result<Client> {
 ///
 /// Returns an error if the proxy URL is invalid or the client cannot be built.
 pub fn probe_client(proxy: Option<&str>) -> reqwest::Result<Client> {
-    build(proxy, Policy::none(), None)
+    probe_client_tls(proxy, false)
 }
 
 /// Like [`probe_client`], but restricted to one address family by binding the
@@ -58,18 +58,32 @@ pub fn probe_client(proxy: Option<&str>) -> reqwest::Result<Client> {
 ///
 /// Returns an error if the client cannot be built.
 pub fn probe_client_family(local: std::net::IpAddr) -> reqwest::Result<Client> {
-    build(None, Policy::none(), Some(local))
+    probe_client_family_tls(local, false)
+}
+
+/// Build a separately pooled probe client with an explicit TLS-verification policy.
+pub fn probe_client_tls(proxy: Option<&str>, ignore_tls: bool) -> reqwest::Result<Client> {
+    build(proxy, Policy::none(), None, ignore_tls)
+}
+
+pub fn probe_client_family_tls(
+    local: std::net::IpAddr,
+    ignore_tls: bool,
+) -> reqwest::Result<Client> {
+    build(None, Policy::none(), Some(local), ignore_tls)
 }
 
 fn build(
     proxy: Option<&str>,
     redirect: Policy,
     local: Option<std::net::IpAddr>,
+    ignore_tls: bool,
 ) -> reqwest::Result<Client> {
     let mut builder = Client::builder()
         .user_agent(concat!("hora/", env!("CARGO_PKG_VERSION")))
         .redirect(redirect)
         .local_address(local)
+        .danger_accept_invalid_certs(ignore_tls)
         // Backstop for requests without a per-request timeout (notifiers); probes
         // override this with the monitor's own timeout.
         .timeout(Duration::from_secs(15))

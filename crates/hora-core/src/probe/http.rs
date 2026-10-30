@@ -21,9 +21,13 @@ pub(super) async fn http(client: &Client, monitor: &Monitor, spec: &HttpSpec) ->
         let mut response = send_following_redirects(client, monitor, spec).await?;
         let latency = millis(start.elapsed());
         let code = response.status().as_u16();
-        let status_ok = match spec.expected_status {
-            Some(expected) => code == expected,
-            None => response.status().is_success(),
+        let status_ok = if spec.expected_statuses.is_empty() {
+            match spec.expected_status {
+                Some(expected) => code == expected,
+                None => response.status().is_success(),
+            }
+        } else {
+            spec.expected_statuses.contains(&code)
         };
         // Read the body only when we need it: to detail a failure, or to run
         // a keyword/JSON assertion. Assertions get a larger budget. The head
@@ -165,13 +169,20 @@ async fn send_following_redirects(
     // probe could never pass.
     let follow = !spec
         .expected_status
-        .is_some_and(|status| (300..400).contains(&status));
+        .is_some_and(|status| (300..400).contains(&status))
+        && (spec.expected_statuses.is_empty()
+            || !spec
+                .expected_statuses
+                .iter()
+                .all(|s| (300..400).contains(s)));
     let mut url = target.clone();
     for _ in 0..=MAX_REDIRECTS {
         // The per-request timeout overrides the client's 15s notifier backstop,
         // which may be *shorter* than the monitor's own; the caller's outer
         // deadline still bounds the whole chain.
-        let mut request = client.get(url.clone()).timeout(monitor.timeout());
+        let mut request = client
+            .request(spec.method.clone(), url.clone())
+            .timeout(monitor.timeout());
         if same_origin(target, &url) {
             request = with_headers(request, &spec.headers);
         }

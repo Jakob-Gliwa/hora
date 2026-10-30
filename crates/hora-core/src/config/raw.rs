@@ -30,6 +30,16 @@ pub(crate) struct RawMonitor {
     #[serde(default)]
     pub(crate) expected_status: Option<u16>,
     #[serde(default)]
+    pub(crate) expected_statuses: Vec<u16>,
+    #[serde(default)]
+    pub(crate) ignore_tls: bool,
+    #[serde(default)]
+    pub(crate) method: Option<String>,
+    #[serde(default)]
+    pub(crate) ping_count: Option<u16>,
+    #[serde(default)]
+    pub(crate) packet_size: Option<u16>,
+    #[serde(default)]
     pub(crate) degraded_over_ms: Option<i64>,
     /// Latency SLO objective in ms: the 24h p95 is flagged met/breached against it.
     #[serde(default)]
@@ -222,6 +232,11 @@ impl Default for RawMonitor {
             interval_secs: 60,
             timeout_secs: default_timeout(),
             expected_status: None,
+            expected_statuses: Vec::new(),
+            ignore_tls: false,
+            method: None,
+            ping_count: None,
+            packet_size: None,
             degraded_over_ms: None,
             slo_latency_ms: None,
             slo_uptime: None,

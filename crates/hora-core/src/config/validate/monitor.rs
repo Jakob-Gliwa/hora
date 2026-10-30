@@ -75,6 +75,10 @@ fn spec_of(raw: &mut RawMonitor) -> anyhow::Result<MonitorKind> {
             url: reqwest::Url::parse(&target).map_err(|_| compiled("target"))?,
             target,
             expected_status: raw.expected_status,
+            expected_statuses: std::mem::take(&mut raw.expected_statuses),
+            ignore_tls: raw.ignore_tls,
+            method: reqwest::Method::from_bytes(raw.method.as_deref().unwrap_or("GET").as_bytes())
+                .map_err(|_| compiled("method"))?,
             headers: std::mem::take(&mut raw.headers),
             keyword: raw.keyword.take().map(|text| KeywordAssert {
                 text,
@@ -119,7 +123,12 @@ fn spec_of(raw: &mut RawMonitor) -> anyhow::Result<MonitorKind> {
             },
             dual_stack,
         }),
-        Kind::Icmp => MonitorKind::Icmp(IcmpSpec { target, dual_stack }),
+        Kind::Icmp => MonitorKind::Icmp(IcmpSpec {
+            target,
+            dual_stack,
+            ping_count: raw.ping_count.unwrap_or(1),
+            packet_size: raw.packet_size.unwrap_or(16),
+        }),
         Kind::Dns => MonitorKind::Dns(DnsSpec {
             target,
             record: match &raw.dns_record {
@@ -274,6 +283,43 @@ fn validate_monitor_io(monitor: &RawMonitor) -> anyhow::Result<()> {
         monitor.max_body_kb != Some(0),
         "monitor {}: max_body_kb must be > 0",
         monitor.id
+    );
+    anyhow::ensure!(
+        monitor.expected_status.is_none() || monitor.expected_statuses.is_empty(),
+        "expected_status and expected_statuses are mutually exclusive"
+    );
+    anyhow::ensure!(
+        monitor
+            .expected_statuses
+            .iter()
+            .all(|s| (100..=599).contains(s)),
+        "expected_statuses must contain HTTP status codes (100-599)"
+    );
+    anyhow::ensure!(
+        monitor.kind == Kind::Http
+            || (monitor.expected_statuses.is_empty()
+                && !monitor.ignore_tls
+                && monitor.method.is_none()),
+        "expected_statuses/ignore_tls/method require an http monitor"
+    );
+    if let Some(method) = &monitor.method {
+        anyhow::ensure!(
+            reqwest::Method::from_bytes(method.as_bytes()).is_ok(),
+            "invalid HTTP method"
+        );
+    }
+    anyhow::ensure!(
+        monitor.kind == Kind::Icmp
+            || (monitor.ping_count.is_none() && monitor.packet_size.is_none()),
+        "ping_count/packet_size require an icmp monitor"
+    );
+    anyhow::ensure!(
+        monitor.ping_count.is_none_or(|n| (1..=10).contains(&n)),
+        "ping_count must be 1..10"
+    );
+    anyhow::ensure!(
+        monitor.packet_size.is_none_or(|n| (1..=4096).contains(&n)),
+        "packet_size must be 1..4096"
     );
     // No server answers outside 100-599, so such a monitor could never be up.
     if let Some(status) = monitor.expected_status {
