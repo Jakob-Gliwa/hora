@@ -1,7 +1,8 @@
 # Running the fork on Unraid
 
 GitHub Actions publishes `ghcr.io/jakob-gliwa/hora:main` after the tests and
-security checks pass. Both `linux/amd64` and `linux/arm64` are included.
+security checks pass. The image targets `linux/amd64` for Unraid and builds natively without QEMU.
+Docs changes do not trigger image builds; no GitHub Pages deployment runs.
 For a fixed version, use `ghcr.io/jakob-gliwa/hora:sha-<full-commit-sha>`.
 The image contains only the application, never installation configuration.
 
