@@ -182,20 +182,25 @@ pub fn spawn_heartbeat(
                 .peers
                 .iter()
                 .filter_map(|peer| {
-                    peer.ping_url
-                        .as_ref()
-                        .map(|url| (url.as_ref(), peer.ping_token.as_ref().map(AsRef::as_ref)))
+                    peer.ping_url.as_ref().map(|url| {
+                        (
+                            url.as_ref(),
+                            peer.ping_token.as_ref().map(AsRef::as_ref),
+                            Some(digest.as_str()),
+                        )
+                    })
                 })
                 .chain(
                     health
                         .heartbeat_url
                         .as_ref()
-                        .map(|url| (url.as_ref(), None)),
+                        .map(|url| (url.as_ref(), None, None)),
                 );
             // Concurrently, under one deadline: sequential 10 s timeouts would
             // let a single dead receiver push every other heartbeat late.
-            let round =
-                join_all(targets.map(|(url, token)| send_heartbeat(&client, url, token, &digest)));
+            let round = join_all(
+                targets.map(|(url, token, digest)| send_heartbeat(&client, url, token, digest)),
+            );
             if tokio::time::timeout(HEARTBEAT_ROUND_DEADLINE, round)
                 .await
                 .is_err()
@@ -206,15 +211,16 @@ pub fn spawn_heartbeat(
     })
 }
 
-/// Fire one heartbeat: `POST {url}?status=up&msg={digest}` with the token (if any)
+/// Fire one heartbeat: an empty POST to external receivers, or
+/// `POST {url}?status=up&msg={digest}` to a peer with the token (if any)
 /// in the `X-Push-Token` header, so it stays out of the receiver's access logs.
 /// Fire-and-forget: a failure is logged (without the URL, which may carry
 /// credentials) and the next tick tries again.
-async fn send_heartbeat(client: &Client, url: &str, token: Option<&str>, digest: &str) {
-    let mut request = client
-        .post(url)
-        .query(&[("status", "up"), ("msg", digest)])
-        .timeout(HEARTBEAT_TIMEOUT);
+async fn send_heartbeat(client: &Client, url: &str, token: Option<&str>, digest: Option<&str>) {
+    let mut request = client.post(url).timeout(HEARTBEAT_TIMEOUT);
+    if let Some(digest) = digest {
+        request = request.query(&[("status", "up"), ("msg", digest)]);
+    }
     if let Some(token) = token {
         request = request.header("x-push-token", token);
     }
@@ -483,6 +489,72 @@ mod tests {
 
     fn cfg(toml: &str) -> Config {
         config::parse(toml).expect("valid config")
+    }
+
+    #[tokio::test]
+    async fn external_heartbeat_omits_details_while_peer_keeps_protocol() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let config = cfg(&format!(
+            r#"
+            [page]
+            [server]
+            [health]
+            id = "synthetic-node"
+            interval_secs = 1
+            heartbeat_url = "http://{address}/external"
+            [[peers]]
+            id = "peer"
+            name = "Synthetic peer"
+            ping_url = "http://{address}/peer"
+            ping_token = "synthetic-test-token"
+            "#
+        ));
+        let (_updates, receiver) = watch::channel(Arc::new(config));
+        let (shutdown, stopping) = watch::channel(false);
+        let heartbeat = spawn_heartbeat(
+            receiver,
+            Store::in_memory().await,
+            Client::builder().no_proxy().build().unwrap(),
+            Arc::new(AtomicU64::new(0)),
+            stopping,
+        );
+        let requests = tokio::time::timeout(Duration::from_secs(5), async {
+            let mut requests = Vec::new();
+            for _ in 0..2 {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut request = Vec::new();
+                let mut buffer = [0; 1024];
+                while !request.windows(4).any(|bytes| bytes == b"\r\n\r\n") {
+                    let count = socket.read(&mut buffer).await.unwrap();
+                    assert!(count > 0 && request.len() < 8192);
+                    request.extend_from_slice(&buffer[..count]);
+                }
+                socket
+                    .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                    .await
+                    .unwrap();
+                requests.push(String::from_utf8(request).unwrap());
+            }
+            requests.sort();
+            requests
+        })
+        .await;
+        shutdown.send(true).unwrap();
+        heartbeat.await.unwrap();
+        let requests = requests.expect("heartbeat reached both loopback receivers");
+        assert!(requests[0].starts_with("POST /external HTTP/1.1\r\n"));
+        assert!(!requests[0].contains("synthetic"));
+        assert!(!requests[0].contains("msg="));
+        assert!(!requests[0].contains("x-push-token"));
+        assert!(requests[0].ends_with("\r\n\r\n"));
+        assert!(
+            requests[1].starts_with("POST /peer?status=up&msg=ok+mon%3D0+tick%3D0s HTTP/1.1\r\n")
+        );
+        assert!(requests[1].contains("x-push-token: synthetic-test-token\r\n"));
     }
 
     #[test]

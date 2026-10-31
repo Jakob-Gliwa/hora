@@ -324,6 +324,14 @@ fn validate_peers(
     if let Some(health) = &config.health {
         anyhow::ensure!(!health.id.is_empty(), "health.id must not be empty");
         validate_period("health.interval_secs", health.interval_secs)?;
+        if let Some(url) = &health.heartbeat_url {
+            anyhow::ensure!(
+                reqwest::Url::parse(url.as_ref()).is_ok_and(|url| {
+                    matches!(url.scheme(), "http" | "https") && url.host_str().is_some()
+                }),
+                "health.heartbeat_url must be a non-empty absolute HTTP(S) URL"
+            );
+        }
     }
     anyhow::ensure!(
         config.peers.is_empty() || config.health.is_some(),

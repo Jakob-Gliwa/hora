@@ -22,6 +22,24 @@ stay in the private config. The script extracts passwords, push tokens,
 authorization headers and URL credentials into environment placeholders. It
 never prints source values. `.local/`, `.env*` and `hora-fork-spec/` are excluded
 from Git and the Docker build context. Do not publish exports or generated files.
+Redaction markers such as `<REDACTED-UUID>` and their URL-encoded forms become
+environment references too. Any leftover redaction marker stops conversion.
+
+For an HTTP watchdog that pings an external dead-man service, pass
+`--watchdog-monitor ID`. That monitor becomes `[health].heartbeat_url`, with
+its interval retained and the URL replaced by `${HORA_HEARTBEAT_URL}`. Create a
+**new, separate check for Hora** and put its complete ping URL in that variable;
+never reuse Kuma's check during parallel operation, even if the export contains
+its real URL. Configure the new check's expected period, grace time and alert
+destinations at the external service. Monitor retry/notification policies do not
+apply to this built-in heartbeat. Scoped or global maintenance affecting the
+watchdog requires an explicit schedule decision and stops automatic conversion.
+
+The built-in heartbeat sends an empty POST when Hora's scheduler and database
+are healthy, and stays silent when they are not. It sends no monitor details to
+the external service. `[health].heartbeat_url` is the external option;
+`ping_url` belongs to a `[[peers]]` entry. The script prepares configuration only;
+it does not create the external check or contact the service.
 
 Fill the variables listed in `environment.example` locally using your existing
 secrets. Load them with your service manager or a shell environment, then run:

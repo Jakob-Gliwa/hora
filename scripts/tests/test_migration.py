@@ -2,6 +2,8 @@ import importlib.util
 import json
 from pathlib import Path
 import sys
+import subprocess
+import tempfile
 import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -34,6 +36,61 @@ def fixture():
 
 
 class MigrationTest(unittest.TestCase):
+    def test_redaction_suffixes_and_url_encoded_markers(self):
+        for marker in ['<REDACTED>', '<REDACTED-UUID>', '<redacted_API_KEY>',
+                       '%3CREDACTED%3E', '%3cREDACTED-UUID%3e']:
+            with self.subTest(marker=marker):
+                data = fixture()
+                data['monitors'][0]['url'] = f'https://example.invalid/{marker}?q={marker}&ok=yes'
+                config, report = migration.Converter(data).convert()
+                self.assertEqual(report['unmapped'], [])
+                self.assertEqual(config['monitors'][0]['target'],
+                                 'https://example.invalid/${HORA_MONITOR_1_SECRET_1}?q=${HORA_MONITOR_1_SECRET_2}&ok=yes')
+                self.assertIn('HORA_MONITOR_1_SECRET_1', report['required_environment'])
+                self.assertIn('HORA_MONITOR_1_SECRET_2', report['required_environment'])
+
+    def test_unresolved_markers_stop_cli_without_replacing_existing_config(self):
+        for marker in ['<REDACTED-UUID', '%3CREDACTED-UUID']:
+            data = fixture()
+            data['monitors'][0]['url'] = 'https://example.invalid/' + marker
+            with tempfile.TemporaryDirectory() as directory:
+                directory = Path(directory)
+                source = directory / 'export.json'
+                source.write_text(json.dumps(data))
+                existing = directory / 'config.toml'
+                existing.write_text('existing private config')
+                result = subprocess.run([sys.executable, str(ROOT / 'migrate-kuma.py'),
+                                         str(source), '--output-dir', str(directory)],
+                                        capture_output=True, text=True)
+                self.assertEqual(result.returncode, 1)
+                self.assertEqual(existing.read_text(), 'existing private config')
+                self.assertNotIn(marker, result.stdout + result.stderr)
+                self.assertTrue(json.loads((directory / 'report.json').read_text())['unmapped'])
+
+    def test_watchdog_requires_separate_url_and_preserves_other_monitors(self):
+        data = fixture()
+        data['monitors'][0]['headers'] = {}
+        data['monitors'][0]['url'] = 'https://example.invalid/old-kuma-check'
+        data['maintenance_windows'][0]['monitors'] = ['Monitor 2']
+        baseline, _ = migration.Converter(data).convert()
+        config, report = migration.Converter(data, watchdog_id=1).convert()
+        self.assertEqual(report['unmapped'], [])
+        self.assertEqual(report['watchdogs'], 1)
+        self.assertEqual(report['monitors'], 7)
+        self.assertEqual(config['monitors'], baseline['monitors'][1:])
+        self.assertEqual(config['health'], dict(id='hora', interval_secs=60,
+                                              heartbeat_url='${HORA_HEARTBEAT_URL}'))
+        self.assertNotIn('old-kuma-check', migration.render(config) + json.dumps(report))
+        self.assertIn('HORA_HEARTBEAT_URL', report['required_environment'])
+
+    def test_invalid_watchdog_or_scoped_maintenance_is_reported(self):
+        data = fixture()
+        for mid in [999, 4, 1]:  # absent, MQTT, custom headers + maintenance
+            self.assertTrue(migration.Converter(data, watchdog_id=mid).convert()[1]['unmapped'])
+        data['monitors'][0]['headers'] = {}
+        data['maintenance_windows'][0]['monitors'] = []  # all monitors
+        self.assertTrue(migration.Converter(data, watchdog_id=1).convert()[1]['unmapped'])
+
     def test_complete_mapping_and_secret_extraction(self):
         config, report = migration.Converter(fixture(), {'4': 300}).convert()
         self.assertEqual(report['unmapped'], [])

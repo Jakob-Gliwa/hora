@@ -18,7 +18,8 @@ MONITOR_FIELDS = set("id name type active description group notifications interv
 CHANNEL_FIELDS = set("name type is_default pushover_priority pushover_sound".split())
 MAINTENANCE_FIELDS = set("active cron description duration monitors strategy timezone title".split())
 SECRET_KEY = re.compile(r"token|api[_-]?key|password|secret|authorization|cookie", re.I)
-REDACTED = re.compile(r"<REDACTED>|%3CREDACTED%3E", re.I)
+REDACTED = re.compile(r"<REDACTED[^>]*>|%3CREDACTED(?:(?!%3E).)*%3E", re.I)
+REDACTED_START = re.compile(r"<REDACTED|%3CREDACTED", re.I)
 
 
 def toml_value(value):
@@ -42,9 +43,10 @@ def render(config):
 
 
 class Converter:
-    def __init__(self, data, freshness=None):
+    def __init__(self, data, freshness=None, watchdog_id=None):
         self.data = data
         self.freshness = freshness or {}
+        self.watchdog_id = str(watchdog_id) if watchdog_id is not None else None
         self.env = {}
         self.issues = []
         self.decisions = []
@@ -252,6 +254,21 @@ class Converter:
             rows.append({"title": window["title"], "cron": window["cron"], "timezone": window.get("timezone", "UTC"), "duration_secs": int(window["duration"]), "monitors": ids})
         return rows
 
+    def watchdog(self, monitor):
+        owner = self.by_id[str(monitor["id"])]
+        self.unknown(owner, monitor, MONITOR_FIELDS)
+        if monitor.get("type") != "http" or not monitor.get("active", 1):
+            self.issue(owner, "watchdog selection must identify an active HTTP monitor")
+        if ((monitor.get("method") or "GET").upper() not in ("GET", "POST", "HEAD")
+                or monitor.get("headers") not in (None, "", "{}", {}) or monitor.get("ignore_tls")):
+            self.issue(owner, "watchdog conversion cannot preserve custom headers, TLS bypass or this HTTP method")
+        interval = int(monitor["interval"])
+        if interval <= 0:
+            raise ValueError("watchdog interval must be positive")
+        self.decisions.append({"owner": owner, "decision": "replaced by health.heartbeat_url; create a separate Hora check, configure its alerts and grace period externally; source URL, notification routes and retry policy are not reused"})
+        return {"id": "hora", "interval_secs": interval,
+                "heartbeat_url": self.placeholder("HORA_HEARTBEAT_URL", "NEW dedicated Hora Healthchecks ping URL; never reuse Kuma's check")}
+
     def convert(self):
         self.unknown("export", self.data, {"source", "notes", "settings", "notification_channels", "maintenance_windows", "monitors"})
         self.unknown("settings", self.data.get("settings", {}), {"keepDataPeriodDays"})
@@ -261,17 +278,28 @@ class Converter:
             if not any(str(m["id"]) == mid and m["type"] == "mqtt" for m in self.monitors):
                 self.issue("freshness", "max-age override does not identify an MQTT monitor")
         channels = self.channels()
-        monitors = [self.monitor(m) for m in self.monitors]
+        selected = [m for m in self.monitors if str(m["id"]) == self.watchdog_id]
+        if self.watchdog_id is not None and len(selected) != 1:
+            self.issue("watchdog", "watchdog selection must identify exactly one source monitor")
+        monitors = [self.monitor(m) for m in self.monitors if str(m["id"]) != self.watchdog_id]
         config = {"page": {"title": "Service status"},
                   "server": {"bind": "127.0.0.1:8787", "database_path": "hora.db", "database": {"cache_kib": 2048, "max_connections": 4}, "auth_token": self.placeholder("HORA_AUTH_TOKEN", "operator/viewer token (generate a new random value)")},
                   "alerts": {"fail_threshold": 3, "default_retention_days": int(self.data.get("settings", {}).get("keepDataPeriodDays", 90))},
                   "updates": {"check": False}, "channels": channels, "brokers": list(self.brokers.values()),
                   "maintenance": self.maintenance(), "monitors": monitors}
+        if len(selected) == 1:
+            config["health"] = self.watchdog(selected[0])
+            watchdog = self.by_id[self.watchdog_id]
+            if any(not w["monitors"] or watchdog in w["monitors"] for w in config["maintenance"]):
+                self.issue("watchdog", "maintenance covering the watchdog needs an explicit external-check schedule; cannot preserve it with health.heartbeat_url")
         channel_names = {c["name"] for c in channels}
         for m in monitors:
             if any(name not in channel_names for name in m["notify"]):
                 self.issue(m["id"], "notification route references an unknown channel")
+        if REDACTED_START.search(render(config)):
+            self.issue("export", "unresolved redaction marker in generated config; fix the source or supply an environment reference")
         report = {"monitors": len(monitors), "groups": len({m.get("group") for m in monitors}),
+                  "watchdogs": int("health" in config),
                   "channels": len(channels), "maintenance_windows": len(config["maintenance"]),
                   "brokers": len(self.brokers), "freshness_overrides": len(self.freshness),
                   "required_environment": self.env, "decisions": self.decisions, "unmapped": self.issues}
@@ -290,6 +318,7 @@ def main():
     parser.add_argument("export", type=Path)
     parser.add_argument("--output-dir", type=Path, default=Path(".local/migration"))
     parser.add_argument("--mqtt-max-age", action="append", default=[], metavar="ID=SECONDS", help="freshness deadline for a known periodic topic; repeatable")
+    parser.add_argument("--watchdog-monitor", metavar="ID", help="replace this HTTP watchdog with health.heartbeat_url for a NEW separate Hora check")
     args = parser.parse_args()
     try:
         freshness = {}
@@ -299,7 +328,7 @@ def main():
             if not 0 < seconds <= 2592000: raise ValueError("invalid MQTT max age")
             freshness[mid] = seconds
         data = json.loads(args.export.read_text(encoding="utf-8"))
-        converter = Converter(data, freshness)
+        converter = Converter(data, freshness, args.watchdog_monitor)
         config, report = converter.convert()
         args.output_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
         config["server"]["database_path"] = str((args.output_dir / "hora.db").resolve())

@@ -12,6 +12,30 @@ fn load(toml_src: &str) -> anyhow::Result<Config> {
     super::parse(toml_src)
 }
 
+#[test]
+fn external_heartbeat_requires_an_absolute_http_url_without_leaking_it() {
+    for url in [
+        "",
+        "relative-secret",
+        "file:///private-secret",
+        "ftp://example.invalid/secret",
+    ] {
+        let error = load(&format!(
+            "[page]\n[server]\n[health]\nid='hora'\nheartbeat_url='{url}'\n"
+        ))
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("health.heartbeat_url"));
+        assert!(!error.contains("secret"));
+    }
+    for url in ["http://127.0.0.1/ping", "https://example.invalid/ping"] {
+        load(&format!(
+            "[page]\n[server]\n[health]\nid='hora'\nheartbeat_url='{url}'\n"
+        ))
+        .expect("HTTP(S) heartbeat accepted");
+    }
+}
+
 fn http_spec(monitor: &Monitor) -> &HttpSpec {
     match &monitor.spec {
         MonitorKind::Http(spec) => spec,

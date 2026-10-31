@@ -455,6 +455,7 @@ pub struct Health {
     pub quorum: bool,
     /// An extra dead-man target (e.g. a healthchecks.io ping URL) pinged every
     /// `interval_secs` when locally healthy, alongside the peers' `ping_url`.
+    /// The external target receives an empty POST, without the peer status digest.
     #[serde(default)]
     pub heartbeat_url: Option<Secret>,
     /// Multi-vantage confirmation: when a monitor confirms down locally, ask
