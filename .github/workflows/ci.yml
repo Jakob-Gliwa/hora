@@ -1,8 +1,7 @@
 name: CI
 
-# Checks run on pushes to main and on pull requests. A tag additionally builds
-# and pushes the image and publishes the release. The image is built only on tags
-# (never twice for one commit) - push main and the tag separately for one run each.
+# Checks gate fork images on main and release tags. Pull requests never publish.
+# Version tags additionally publish a GitHub release.
 on:
   pull_request:
   push:
@@ -52,13 +51,13 @@ jobs:
           persist-credentials: false
       - uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
 
-  # Build & publish the image once checks pass - tags only, so it builds once.
+  # Build and publish the personal fork after checks, on main and release tags.
   # RustSec advisory scanning lives in audit.yml (path-filtered + scheduled);
   # releases stay gated on advisories regardless, since `deny` checks the same
   # database on every run.
   docker:
     needs: [check, deny]
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: github.repository == 'Jakob-Gliwa/hora' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -79,11 +78,12 @@ jobs:
         id: meta
         uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
         with:
-          images: ghcr.io/${{ github.repository_owner }}/hora
+          images: ghcr.io/jakob-gliwa/hora
           tags: |
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
-            type=sha
+            type=raw,value=main,enable={{is_default_branch}}
+            type=sha,format=long
       - name: Build and push
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
@@ -97,6 +97,26 @@ jobs:
           # Supply-chain metadata attached to the image: build provenance and an SBOM.
           provenance: mode=max
           sbom: true
+
+      - name: Smoke test published image
+        env:
+          IMAGE: ghcr.io/jakob-gliwa/hora:sha-${{ github.sha }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/hora-smoke"
+          printf '[page]\n[server]\n' > "$RUNNER_TEMP/hora-smoke/config.toml"
+          chmod 755 "$RUNNER_TEMP/hora-smoke"
+          chmod 644 "$RUNNER_TEMP/hora-smoke/config.toml"
+          docker run -d --name hora-smoke --network none \
+            -v "$RUNNER_TEMP/hora-smoke/config.toml:/etc/hora/config.toml:ro" "$IMAGE"
+          trap 'docker rm -fv hora-smoke >/dev/null 2>&1 || true' EXIT
+          for attempt in $(seq 1 30); do
+            if docker exec hora-smoke wget -qO /dev/null http://127.0.0.1:8787/healthz; then
+              exit 0
+            fi
+            sleep 1
+          done
+          docker logs hora-smoke
+          exit 1
 
   # Publish the GitHub release once the image is out, with notes from CHANGELOG.md.
   release:
