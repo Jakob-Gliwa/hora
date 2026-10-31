@@ -20,7 +20,7 @@ enum Timing {
         end: DateTime<Utc>,
     },
     Recurring {
-        cron: Compiled<croner::Cron>,
+        cron: Box<Compiled<croner::Cron>>,
         timezone: chrono_tz::Tz,
         duration: TimeDelta,
     },
@@ -60,10 +60,10 @@ impl TryFrom<RawMaintenance> for Maintenance {
                         .map_err(|_| "maintenance: unknown IANA timezone")?;
                     let duration = raw
                         .duration_secs
-                        .filter(|s| (1..=604800).contains(s))
+                        .filter(|s| (1..=604_800).contains(s))
                         .ok_or("maintenance: duration_secs must be 1..604800")?;
                     Timing::Recurring {
-                        cron: Compiled::parse(&cron)?,
+                        cron: Box::new(Compiled::parse(&cron)?),
                         timezone,
                         duration: TimeDelta::seconds(i64::from(duration)),
                     }

@@ -25,6 +25,9 @@ pub struct PushoverOptions {
 
 impl PushoverOptions {
     /// Reject combinations the API cannot deliver, before starting the daemon.
+    ///
+    /// # Errors
+    /// Returns an error for invalid priorities, emergency timing or an empty sound.
     pub fn validate(&self) -> anyhow::Result<()> {
         anyhow::ensure!(
             self.priority.is_none_or(|p| (-2..=2).contains(&p)),

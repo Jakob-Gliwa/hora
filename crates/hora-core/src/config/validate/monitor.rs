@@ -39,6 +39,7 @@ pub(crate) fn monitor_from_raw(mut raw: RawMonitor) -> anyhow::Result<Monitor> {
     Ok(Monitor {
         id: raw.id,
         name: raw.name,
+        description: raw.description,
         interval_secs: raw.interval_secs,
         timeout_secs: raw.timeout_secs,
         degraded_over_ms: raw.degraded_over_ms,
@@ -114,31 +115,7 @@ fn spec_of(raw: &mut RawMonitor) -> anyhow::Result<MonitorKind> {
             proxy: raw.proxy.take(),
             dual_stack,
         }),
-        Kind::Mqtt => MonitorKind::Mqtt(crate::config::MqttSpec {
-            broker: raw.broker.take().ok_or_else(|| compiled("broker"))?,
-            topic: raw.topic.take().ok_or_else(|| compiled("topic"))?,
-            max_age_secs: raw.max_age_secs,
-            max_body_kb: raw.max_body_kb,
-            keyword: raw.keyword.take().map(|text| KeywordAssert {
-                text,
-                invert: raw.keyword_invert,
-            }),
-            json: match raw.json_query.take() {
-                Some(query) => Some(JsonAssert {
-                    query: query.compiled().ok_or_else(|| compiled("json_query"))?,
-                    expected: raw.json_expected.take(),
-                }),
-                None => None,
-            },
-            jq: match raw.jq.take() {
-                Some(query) => Some(crate::assertion::JqAssert {
-                    query: query.compiled().ok_or_else(|| compiled("jq"))?,
-                    expected: raw.jq_expected.take(),
-                    operator: raw.jq_operator,
-                }),
-                None => None,
-            },
-        }),
+        Kind::Mqtt => MonitorKind::Mqtt(mqtt_spec(raw)?),
         Kind::Tcp => MonitorKind::Tcp(TcpSpec {
             target,
             starttls: match raw.starttls.as_deref() {
@@ -189,6 +166,36 @@ fn spec_of(raw: &mut RawMonitor) -> anyhow::Result<MonitorKind> {
                 args: command.collect(),
             })
         }
+    })
+}
+
+fn mqtt_spec(raw: &mut RawMonitor) -> anyhow::Result<crate::config::MqttSpec> {
+    let id = raw.id.clone();
+    let compiled = |field: &str| anyhow::anyhow!("monitor {id}: invalid {field}");
+    Ok(crate::config::MqttSpec {
+        broker: raw.broker.take().ok_or_else(|| compiled("broker"))?,
+        topic: raw.topic.take().ok_or_else(|| compiled("topic"))?,
+        max_age_secs: raw.max_age_secs,
+        max_body_kb: raw.max_body_kb,
+        keyword: raw.keyword.take().map(|text| KeywordAssert {
+            text,
+            invert: raw.keyword_invert,
+        }),
+        json: match raw.json_query.take() {
+            Some(query) => Some(JsonAssert {
+                query: query.compiled().ok_or_else(|| compiled("json_query"))?,
+                expected: raw.json_expected.take(),
+            }),
+            None => None,
+        },
+        jq: match raw.jq.take() {
+            Some(query) => Some(crate::assertion::JqAssert {
+                query: query.compiled().ok_or_else(|| compiled("jq"))?,
+                expected: raw.jq_expected.take(),
+                operator: raw.jq_operator,
+            }),
+            None => None,
+        },
     })
 }
 
@@ -257,6 +264,81 @@ fn validate_exec_io(monitor: &RawMonitor) -> anyhow::Result<()> {
 
 /// Validate a monitor's target, latency thresholds and headers.
 fn validate_monitor_io(monitor: &RawMonitor) -> anyhow::Result<()> {
+    validate_target(monitor)?;
+    anyhow::ensure!(
+        monitor.kind == Kind::Exec || monitor.command.is_empty(),
+        "monitor {}: `command` requires kind = \"exec\"",
+        monitor.id
+    );
+    // A negative latency threshold would mark every check degraded/breached.
+    for (label, value) in [
+        ("degraded_over_ms", monitor.degraded_over_ms),
+        ("slo_latency_ms", monitor.slo_latency_ms),
+    ] {
+        if let Some(ms) = value {
+            anyhow::ensure!(ms > 0, "monitor {}: {label} must be > 0", monitor.id);
+        }
+    }
+    // Each retry can cost a full timeout; an unbounded count would let one
+    // tick outlive several intervals.
+    anyhow::ensure!(
+        monitor.probe_retries.is_none_or(|retries| retries <= 5),
+        "monitor {}: probe_retries must be at most 5",
+        monitor.id
+    );
+    anyhow::ensure!(
+        monitor.max_body_kb != Some(0),
+        "monitor {}: max_body_kb must be > 0",
+        monitor.id
+    );
+    validate_http_and_ping_options(monitor)?;
+    anyhow::ensure!(
+        matches!(monitor.kind, Kind::Http | Kind::Mqtt)
+            || (monitor.keyword.is_none()
+                && monitor.json_query.is_none()
+                && monitor.jq.is_none()
+                && monitor.number_regex.is_none()
+                && monitor.proxy.is_none()),
+        "monitor {}: keyword/json_query/number_regex/proxy require an http monitor",
+        monitor.id
+    );
+    anyhow::ensure!(
+        monitor.kind == Kind::Http || (monitor.proxy.is_none() && monitor.number_regex.is_none()),
+        "proxy/number_regex require an http monitor"
+    );
+    anyhow::ensure!(
+        monitor.kind == Kind::Mqtt
+            || (monitor.broker.is_none()
+                && monitor.topic.is_none()
+                && monitor.max_age_secs.is_none()),
+        "broker/topic/max_age_secs require an mqtt monitor"
+    );
+    validate_body_assertions(monitor)?;
+    if let Some(proxy) = &monitor.proxy {
+        reqwest::Proxy::all(proxy)
+            .map_err(|err| anyhow::anyhow!("monitor {}: invalid proxy: {err}", monitor.id))?;
+    }
+    anyhow::ensure!(
+        monitor.kind == Kind::Dns
+            || (monitor.dns_record.is_none()
+                && monitor.dns_expected.is_none()
+                && monitor.dns_resolver.is_none()),
+        "monitor {}: dns_record/dns_expected/dns_resolver require a dns monitor",
+        monitor.id
+    );
+    validate_starttls(monitor)?;
+    // A malformed pin (wrong length, non-hex) can never match the observed
+    // fingerprint, which silently disables pinning after one spurious alert.
+    validate_pins(monitor)?;
+    if monitor.dual_stack.unwrap_or(false) {
+        validate_dual_stack(monitor)?;
+    }
+    validate_alert_and_push_options(monitor)?;
+    validate_schedule_and_slo(monitor)?;
+    Ok(())
+}
+
+fn validate_target(monitor: &RawMonitor) -> anyhow::Result<()> {
     // Parse the target now, so a typo fails at load instead of at probe time.
     match monitor.kind {
         Kind::Http => anyhow::ensure!(
@@ -307,32 +389,37 @@ fn validate_monitor_io(monitor: &RawMonitor) -> anyhow::Result<()> {
         Kind::Exec => validate_exec_io(monitor)?,
         Kind::Dns => validate_dns_io(monitor)?,
     }
+    Ok(())
+}
+
+fn validate_alert_and_push_options(monitor: &RawMonitor) -> anyhow::Result<()> {
     anyhow::ensure!(
-        monitor.kind == Kind::Exec || monitor.command.is_empty(),
-        "monitor {}: `command` requires kind = \"exec\"",
-        monitor.id
+        monitor
+            .fail_threshold
+            .is_none_or(|n| (1..=1000).contains(&n)),
+        "fail_threshold must be 1..1000"
     );
-    // A negative latency threshold would mark every check degraded/breached.
-    for (label, value) in [
-        ("degraded_over_ms", monitor.degraded_over_ms),
-        ("slo_latency_ms", monitor.slo_latency_ms),
-    ] {
-        if let Some(ms) = value {
-            anyhow::ensure!(ms > 0, "monitor {}: {label} must be > 0", monitor.id);
-        }
+    if let Some(secs) = monitor.retry_interval_secs {
+        super::validate_period("retry_interval_secs", secs)?;
     }
-    // Each retry can cost a full timeout; an unbounded count would let one
-    // tick outlive several intervals.
+    if let Some(secs) = monitor.repeat_alert_secs.filter(|s| *s != 0) {
+        super::validate_period("repeat_alert_secs", secs)?;
+    }
+    if let Some(secs) = monitor.push_poll_secs {
+        super::validate_period("push_poll_secs", secs)?;
+        anyhow::ensure!(
+            monitor.kind == Kind::Push && secs <= monitor.interval_secs,
+            "push_poll_secs requires push and must not exceed interval_secs"
+        );
+    }
     anyhow::ensure!(
-        monitor.probe_retries.is_none_or(|retries| retries <= 5),
-        "monitor {}: probe_retries must be at most 5",
-        monitor.id
+        !monitor.kuma_push || (monitor.kind == Kind::Push && monitor.push_token.is_some()),
+        "kuma_push requires a push monitor with push_token"
     );
-    anyhow::ensure!(
-        monitor.max_body_kb != Some(0),
-        "monitor {}: max_body_kb must be > 0",
-        monitor.id
-    );
+    Ok(())
+}
+
+fn validate_http_and_ping_options(monitor: &RawMonitor) -> anyhow::Result<()> {
     anyhow::ensure!(
         monitor.expected_status.is_none() || monitor.expected_statuses.is_empty(),
         "expected_status and expected_statuses are mutually exclusive"
@@ -391,71 +478,6 @@ fn validate_monitor_io(monitor: &RawMonitor) -> anyhow::Result<()> {
             monitor.id
         );
     }
-    anyhow::ensure!(
-        matches!(monitor.kind, Kind::Http | Kind::Mqtt)
-            || (monitor.keyword.is_none()
-                && monitor.json_query.is_none()
-                && monitor.jq.is_none()
-                && monitor.number_regex.is_none()
-                && monitor.proxy.is_none()),
-        "monitor {}: keyword/json_query/number_regex/proxy require an http monitor",
-        monitor.id
-    );
-    anyhow::ensure!(
-        monitor.kind == Kind::Http || (monitor.proxy.is_none() && monitor.number_regex.is_none()),
-        "proxy/number_regex require an http monitor"
-    );
-    anyhow::ensure!(
-        monitor.kind == Kind::Mqtt
-            || (monitor.broker.is_none()
-                && monitor.topic.is_none()
-                && monitor.max_age_secs.is_none()),
-        "broker/topic/max_age_secs require an mqtt monitor"
-    );
-    validate_body_assertions(monitor)?;
-    if let Some(proxy) = &monitor.proxy {
-        reqwest::Proxy::all(proxy)
-            .map_err(|err| anyhow::anyhow!("monitor {}: invalid proxy: {err}", monitor.id))?;
-    }
-    anyhow::ensure!(
-        monitor.kind == Kind::Dns
-            || (monitor.dns_record.is_none()
-                && monitor.dns_expected.is_none()
-                && monitor.dns_resolver.is_none()),
-        "monitor {}: dns_record/dns_expected/dns_resolver require a dns monitor",
-        monitor.id
-    );
-    validate_starttls(monitor)?;
-    // A malformed pin (wrong length, non-hex) can never match the observed
-    // fingerprint, which silently disables pinning after one spurious alert.
-    validate_pins(monitor)?;
-    if monitor.dual_stack.unwrap_or(false) {
-        validate_dual_stack(monitor)?;
-    }
-    anyhow::ensure!(
-        monitor
-            .fail_threshold
-            .is_none_or(|n| (1..=1000).contains(&n)),
-        "fail_threshold must be 1..1000"
-    );
-    if let Some(secs) = monitor.retry_interval_secs {
-        super::validate_period("retry_interval_secs", secs)?;
-    }
-    if let Some(secs) = monitor.repeat_alert_secs.filter(|s| *s != 0) {
-        super::validate_period("repeat_alert_secs", secs)?;
-    }
-    if let Some(secs) = monitor.push_poll_secs {
-        super::validate_period("push_poll_secs", secs)?;
-        anyhow::ensure!(
-            monitor.kind == Kind::Push && secs <= monitor.interval_secs,
-            "push_poll_secs requires push and must not exceed interval_secs"
-        );
-    }
-    anyhow::ensure!(
-        !monitor.kuma_push || (monitor.kind == Kind::Push && monitor.push_token.is_some()),
-        "kuma_push requires a push monitor with push_token"
-    );
-    validate_schedule_and_slo(monitor)?;
     Ok(())
 }
 

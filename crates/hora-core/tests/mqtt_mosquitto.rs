@@ -1,4 +1,5 @@
 //! Real broker regression test. Run with scripts/test-mqtt.sh.
+use std::fmt::Write as _;
 use std::sync::{
     Arc,
     atomic::{AtomicUsize, Ordering},
@@ -37,6 +38,7 @@ async fn docker(action: &str, container: &str) {
 }
 
 #[tokio::test]
+#[allow(clippy::too_many_lines)] // One broker lifecycle scenario with shared test resources.
 #[ignore = "requires the isolated Mosquitto container created by scripts/test-mqtt.sh"]
 async fn mqtt_mosquitto_retained_periodic_restart_reload_and_one_connection() {
     let url = std::env::var("HORA_TEST_MQTT_URL").expect("test broker URL");
@@ -46,10 +48,10 @@ async fn mqtt_mosquitto_retained_periodic_restart_reload_and_one_connection() {
     let publisher = ClientBuilder::new(&url)
         .unwrap()
         .on_inbound(move |message| {
-            if message.topic == "$SYS/broker/clients/connected" {
-                if let Ok(value) = std::str::from_utf8(&message.payload).unwrap_or("").parse() {
-                    count.store(value, Ordering::Relaxed);
-                }
+            if message.topic == "$SYS/broker/clients/connected"
+                && let Ok(value) = std::str::from_utf8(&message.payload).unwrap_or("").parse()
+            {
+                count.store(value, Ordering::Relaxed);
             }
         })
         .options(|o| o.keep_alive(Duration::from_secs(5)))
@@ -70,7 +72,7 @@ async fn mqtt_mosquitto_retained_periodic_restart_reload_and_one_connection() {
     let mut raw =
         format!("[page]\n[server]\n[[brokers]]\nname='test'\nurl='{url}'\nkeep_alive_secs=5\n");
     for i in 0..16 {
-        raw.push_str(&format!("[[monitors]]\nid='state-{i}'\nname='State {i}'\nkind='mqtt'\nbroker='test'\ntopic='test/state'\nkeyword='online'\ninterval_secs=1\n"));
+        write!(raw, "[[monitors]]\nid='state-{i}'\nname='State {i}'\nkind='mqtt'\nbroker='test'\ntopic='test/state'\nkeyword='online'\ninterval_secs=1\n").unwrap();
     }
     raw.push_str("[[monitors]]\nid='periodic'\nname='Periodic'\nkind='mqtt'\nbroker='test'\ntopic='test/periodic'\nkeyword='sensorData'\nmax_age_secs=1\ninterval_secs=1\n");
     raw.push_str("[[monitors]]\nid='metric'\nname='Metric'\nkind='mqtt'\nbroker='test'\ntopic='test/metric'\njq='.value > 10'\ninterval_secs=1\n");

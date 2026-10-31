@@ -15,9 +15,12 @@ use super::secret::Secret;
 /// [`MonitorKind`]).
 #[derive(Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
+#[allow(clippy::struct_excessive_bools)] // Flat TOML input; converted to kind-specific settings.
 pub(crate) struct RawMonitor {
     pub(crate) id: String,
     pub(crate) name: String,
+    #[serde(default)]
+    pub(crate) description: Option<String>,
     #[serde(default)]
     pub(crate) kind: Kind,
     #[serde(default)]
@@ -243,6 +246,7 @@ impl Default for RawMonitor {
         Self {
             id: String::new(),
             name: String::new(),
+            description: None,
             kind: Kind::default(),
             broker: None,
             topic: None,

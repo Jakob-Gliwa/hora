@@ -30,6 +30,8 @@ allow-wildcard-paths = true
 multiple-versions = "deny"
 skip = [
     { crate = "hashbrown" },
+    # jaq-json uses foldhash 0.1; hashbrown's current line uses 0.2.
+    { crate = "foldhash" },
     { crate = "thiserror" },
     { crate = "thiserror-impl" },
     { crate = "windows-sys" },

@@ -98,6 +98,10 @@ impl ParseField for JqProgram {
 
 impl JqProgram {
     /// Require exactly one scalar result; never collect an unbounded output stream.
+    ///
+    /// # Errors
+    /// Returns a payload-free error for invalid JSON, evaluation failure or
+    /// anything other than exactly one non-null scalar output.
     pub fn evaluate(&self, body: &[u8]) -> Result<serde_json::Value, &'static str> {
         let input: Val = serde_json::from_slice(body).map_err(|_| "payload is not valid JSON")?;
         let ctx = Ctx::<data::JustLut<Val>>::new(&self.0.lut, Vars::new([]));
@@ -147,6 +151,7 @@ pub struct JqAssert {
 
 impl JqAssert {
     #[must_use]
+    #[allow(clippy::float_cmp)] // Exact equality is the configured assertion, not an approximation.
     pub fn check(&self, body: &[u8]) -> Option<String> {
         let value = match self.query.evaluate(body) {
             Ok(value) => value,

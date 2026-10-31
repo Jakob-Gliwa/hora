@@ -55,13 +55,21 @@ fn interleave(addrs: Vec<SocketAddr>) -> Vec<SocketAddr> {
 
 /// Race the connects to `addrs` (see [`connect`]).
 pub(crate) async fn race(addrs: Vec<SocketAddr>) -> io::Result<TcpStream> {
+    race_with(addrs, TcpStream::connect).await
+}
+
+async fn race_with<F, C>(addrs: Vec<SocketAddr>, connect: C) -> io::Result<TcpStream>
+where
+    C: Fn(SocketAddr) -> F,
+    F: std::future::Future<Output = io::Result<TcpStream>>,
+{
     let mut queue = addrs.into_iter();
     let mut attempts = FuturesUnordered::new();
     let mut last_error = None;
     loop {
         if attempts.is_empty() {
             match queue.next() {
-                Some(addr) => attempts.push(TcpStream::connect(addr)),
+                Some(addr) => attempts.push(connect(addr)),
                 None => {
                     return Err(last_error.unwrap_or_else(|| {
                         io::Error::new(io::ErrorKind::NotFound, "no address for host")
@@ -77,13 +85,13 @@ pub(crate) async fn race(addrs: Vec<SocketAddr>) -> io::Result<TcpStream> {
                 Err(err) => {
                     last_error = Some(err);
                     if let Some(addr) = queue.next() {
-                        attempts.push(TcpStream::connect(addr));
+                        attempts.push(connect(addr));
                     }
                 }
             },
             () = tokio::time::sleep(ATTEMPT_DELAY), if more => {
                 if let Some(addr) = queue.next() {
-                    attempts.push(TcpStream::connect(addr));
+                    attempts.push(connect(addr));
                 }
             }
         }
@@ -116,15 +124,22 @@ mod tests {
         );
     }
 
-    /// A first address that never answers (TEST-NET-1 is not routed) does
-    /// not keep the probe from the working second one.
+    /// An injected pending connect models a blackhole independently of VPNs
+    /// and transparent proxies that may accept TEST-NET connections.
     #[tokio::test]
     async fn a_blackholed_address_does_not_eat_the_timeout() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let good = listener.local_addr().unwrap();
         let dead: SocketAddr = format!("192.0.2.1:{}", good.port()).parse().unwrap();
         let start = std::time::Instant::now();
-        let stream = tokio::time::timeout(Duration::from_secs(5), race(vec![dead, good]))
+        let connects = race_with(vec![dead, good], |address| async move {
+            if address == dead {
+                std::future::pending().await
+            } else {
+                TcpStream::connect(address).await
+            }
+        });
+        let stream = tokio::time::timeout(Duration::from_secs(5), connects)
             .await
             .expect("well within the timeout")
             .expect("connected");

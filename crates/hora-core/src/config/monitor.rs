@@ -111,6 +111,7 @@ impl std::fmt::Debug for ReleaseWatch {
 pub struct Monitor {
     pub id: String,
     pub name: String,
+    pub description: Option<String>,
     pub interval_secs: u64,
     pub timeout_secs: u64,
     /// Latency above which a passing check counts as degraded.
@@ -404,6 +405,7 @@ impl std::fmt::Debug for Monitor {
         f.debug_struct("Monitor")
             .field("id", &self.id)
             .field("name", &self.name)
+            .field("description", &self.description)
             .field("interval_secs", &self.interval_secs)
             .field("timeout_secs", &self.timeout_secs)
             .field("degraded_over_ms", &self.degraded_over_ms)
@@ -411,6 +413,9 @@ impl std::fmt::Debug for Monitor {
             .field("slo_uptime", &self.slo_uptime)
             .field("slo_window_days", &self.slo_window_days)
             .field("probe_retries", &self.probe_retries)
+            .field("fail_threshold", &self.fail_threshold)
+            .field("retry_interval_secs", &self.retry_interval_secs)
+            .field("repeat_alert_secs", &self.repeat_alert_secs)
             .field("notify", &self.notify)
             .field("check_cert", &self.check_cert)
             .field("retention_days", &self.retention_days)

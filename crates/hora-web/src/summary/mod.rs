@@ -72,6 +72,27 @@ const RECENT_SCAN: i64 = 50;
 /// Incidents the status page lists under "Recent incidents".
 const RECENT_SHOWN: usize = 3;
 
+fn monitor_statuses(
+    config: &Config,
+    recent: &HashMap<String, Vec<Latest>>,
+) -> HashMap<String, MonitorState> {
+    config
+        .monitors
+        .iter()
+        .filter_map(|monitor| {
+            recent.get(&monitor.id).map(|checks| {
+                (
+                    monitor.id.clone(),
+                    db::derive_status(
+                        checks,
+                        i64::from(monitor.fail_threshold(config.alerts.fail_threshold)),
+                    ),
+                )
+            })
+        })
+        .collect()
+}
+
 /// Build the operator's page/API view model - every monitor, full detail,
 /// event markers and channel health. Every other audience's view is derived
 /// from it in memory ([`derive`]), never from another pass over the database.
@@ -139,15 +160,7 @@ pub(crate) async fn build_summary(
     let marks = or_empty(marks, "incident marks");
     let logged = or_empty(logged, "recent incidents");
     let (availability, percentiles) = split_window(&window);
-    let statuses: HashMap<String, MonitorState> = recent
-        .iter()
-        .map(|(id, checks)| {
-            (
-                id.clone(),
-                db::derive_status(checks, i64::from(config.fail_threshold(id))),
-            )
-        })
-        .collect();
+    let statuses = monitor_statuses(config, &recent);
 
     let data = MonitorData {
         recent: &recent,

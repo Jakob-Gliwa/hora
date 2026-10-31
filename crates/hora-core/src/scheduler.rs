@@ -459,10 +459,10 @@ async fn run(
         // between: see [`AlertCell`].
         alert_state.set(state);
         if state.last_down_alert != saved_alert {
-            if let Some(at) = state.last_down_alert {
-                if let Err(err) = db::meta_set(&store, &repeat_key, &at.to_string()).await {
-                    warn!(monitor = %monitor.id, "could not persist reminder time: {err}");
-                }
+            if let Some(at) = state.last_down_alert
+                && let Err(err) = db::meta_set(&store, &repeat_key, &at.to_string()).await
+            {
+                warn!(monitor = %monitor.id, "could not persist reminder time: {err}");
             }
             saved_alert = state.last_down_alert;
         }

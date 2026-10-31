@@ -62,10 +62,17 @@ pub fn probe_client_family(local: std::net::IpAddr) -> reqwest::Result<Client> {
 }
 
 /// Build a separately pooled probe client with an explicit TLS-verification policy.
+///
+/// # Errors
+/// Returns an error if the client or proxy cannot be configured.
 pub fn probe_client_tls(proxy: Option<&str>, ignore_tls: bool) -> reqwest::Result<Client> {
     build(proxy, Policy::none(), None, ignore_tls)
 }
 
+/// Build a probe client bound to one address family with explicit TLS policy.
+///
+/// # Errors
+/// Returns an error if the client cannot be built.
 pub fn probe_client_family_tls(
     local: std::net::IpAddr,
     ignore_tls: bool,

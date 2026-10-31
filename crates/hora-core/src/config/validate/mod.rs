@@ -163,6 +163,24 @@ pub(super) fn validate(config: &Config) -> anyhow::Result<()> {
         )?;
     }
 
+    validate_kuma_tokens(config, &seen)?;
+    crate::topology::validate_dag(&config.monitors)?;
+
+    validate_peers(config, &seen, &channel_names)?;
+
+    validate_confirm(config)?;
+    validate_exec(config)?;
+    validate_digest(config, &channel_names)?;
+    validate_routes("updates", config.updates.notify.as_deref(), &channel_names)?;
+    validate_routes(
+        "alerts.notify_unconfirmed",
+        config.alerts.notify_unconfirmed.as_deref(),
+        &channel_names,
+    )?;
+    Ok(())
+}
+
+fn validate_kuma_tokens(config: &Config, seen: &HashSet<&str>) -> anyhow::Result<()> {
     let mut push_tokens = HashSet::new();
     for monitor in &config.monitors {
         if matches!(&monitor.spec, super::MonitorKind::Push(push) if push.kuma_compatible) {
@@ -179,19 +197,6 @@ pub(super) fn validate(config: &Config) -> anyhow::Result<()> {
             );
         }
     }
-    crate::topology::validate_dag(&config.monitors)?;
-
-    validate_peers(config, &seen, &channel_names)?;
-
-    validate_confirm(config)?;
-    validate_exec(config)?;
-    validate_digest(config, &channel_names)?;
-    validate_routes("updates", config.updates.notify.as_deref(), &channel_names)?;
-    validate_routes(
-        "alerts.notify_unconfirmed",
-        config.alerts.notify_unconfirmed.as_deref(),
-        &channel_names,
-    )?;
     Ok(())
 }
 
