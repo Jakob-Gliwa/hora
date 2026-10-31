@@ -41,9 +41,18 @@ jobs:
           toolchain: 1.99.1
           components: clippy, rustfmt
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      # The runner image ships cmake and clang; apt only runs for what is
+      # missing, with short timeouts, so a hanging Ubuntu mirror cannot stall CI.
       - name: Install build dependencies (aws-lc-rs)
         timeout-minutes: 5
-        run: sudo apt-get update && sudo apt-get install -y cmake clang libclang-dev
+        run: |
+          missing=""
+          command -v cmake >/dev/null || missing="$missing cmake"
+          command -v clang >/dev/null || missing="$missing clang"
+          ldconfig -p | grep -q libclang || missing="$missing libclang-dev"
+          if [ -z "$missing" ]; then echo "cmake, clang and libclang present"; exit 0; fi
+          apt_opts="-o Acquire::Retries=3 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20"
+          sudo apt-get $apt_opts update && sudo apt-get $apt_opts install -y $missing
       - name: Format
         run: cargo fmt --all -- --check
       - name: Clippy
