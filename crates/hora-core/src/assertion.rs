@@ -1,6 +1,7 @@
 //! jq expressions compiled once at configuration load and shared by HTTP/MQTT.
 
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::{Arc, LazyLock, Mutex, PoisonError, Weak};
 
 use jaq_core::{
     Ctx, Vars, data,
@@ -26,11 +27,21 @@ pub(crate) fn check_keyword(keyword: &crate::config::KeywordAssert, body: &[u8])
 
 type Filter = jaq_core::Filter<data::JustLut<Val>>;
 
+// Repeated monitor expressions share bytecode, including across live reloads.
+// Weak entries never keep a removed program alive; prune dead keys on misses.
+static PROGRAMS: LazyLock<Mutex<HashMap<String, Weak<Filter>>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
 #[derive(Clone)]
 pub struct JqProgram(Arc<Filter>);
 
 impl ParseField for JqProgram {
     fn parse_field(raw: &str) -> Result<Self, String> {
+        let mut programs = PROGRAMS.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some(program) = programs.get(raw).and_then(Weak::upgrade) {
+            return Ok(Self(program));
+        }
+        programs.retain(|_, program| program.strong_count() > 0);
         // No env, debug, filesystem, module loader or subprocess capabilities.
         let defs = jaq_core::defs()
             .chain(jaq_std::defs().filter(|def| {
@@ -92,7 +103,9 @@ impl ParseField for JqProgram {
             .with_funs(funs)
             .compile(modules)
             .map_err(|_| "invalid jq expression or unavailable function".to_owned())?;
-        Ok(Self(Arc::new(filter)))
+        let filter = Arc::new(filter);
+        programs.insert(raw.to_owned(), Arc::downgrade(&filter));
+        Ok(Self(filter))
     }
 }
 
@@ -182,6 +195,13 @@ impl JqAssert {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn identical_queries_share_compiled_bytecode() {
+        let first = JqProgram::parse_field(".shared == true").unwrap();
+        let second = JqProgram::parse_field(".shared == true").unwrap();
+        assert!(Arc::ptr_eq(&first.0, &second.0));
+    }
 
     fn check(query: &str, body: &str, expected: &str) -> bool {
         JqAssert {

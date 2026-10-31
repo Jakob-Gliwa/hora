@@ -17,6 +17,21 @@ services down behind one database send one alert: the cause.
   <img alt="The Hora status page of Pelican, its logo beside the name: the hour and one sentence, then the services by group with their daily bars" src="docs/public/screenshot-light.webp">
 </picture>
 
+## Fork extensions
+
+This fork adds opt-in [shared MQTT monitors](docs/mqtt.md) with mqtt-glide,
+[jq assertions](docs/jq-assertions.md) with jaq,
+[per-monitor alert policies](docs/alert-policy.md),
+[recurring maintenance](docs/recurring-maintenance.md),
+[Kuma-compatible push endpoints](docs/kuma-push.md),
+[Pushover priority/sound](docs/pushover-options.md), and
+[additional HTTP/ICMP options](docs/probe-compatibility.md).
+
+Use the [private migration guide](docs/kuma-migration.md) for normalized Kuma
+exports and the [resource budget guide](docs/resource-budget.md) for low-memory
+settings and isolated measurements. Build this fork from source or its Dockerfile;
+upstream release images do not include these extensions.
+
 ## Install
 
 1. **Write a config.** A minimal `hora-config/config.toml`:

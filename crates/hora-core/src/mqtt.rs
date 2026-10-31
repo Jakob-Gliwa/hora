@@ -411,8 +411,10 @@ async fn run_broker(
         return;
     };
     let _ = state.client.set(client.clone());
+    let mut phase = client.session_phase();
     let mut subscribed = false;
     loop {
+        phase.borrow_and_update();
         if *stopped.borrow() {
             break;
         }
@@ -438,6 +440,7 @@ async fn run_broker(
         }
         tokio::select! {
             _ = stopped.changed() => break,
+            changed = phase.changed() => { if changed.is_err() { break; } }
             () = tokio::time::sleep(Duration::from_secs(2)) => {}
         }
     }

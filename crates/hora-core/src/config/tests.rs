@@ -2371,3 +2371,19 @@ fn mqtt_config_rejects_unbounded_topics_and_unknown_brokers() {
         .is_err()
     );
 }
+
+#[test]
+fn database_budget_keeps_defaults_and_validates_explicit_limits() {
+    let config = super::parse(MINIMAL).unwrap();
+    assert_eq!(config.server.database.cache_kib, 16_000);
+    assert_eq!(config.server.database.max_connections, 8);
+    let config = super::parse(&format!(
+        "{MINIMAL}\n[server.database]\ncache_kib=2048\nmax_connections=4"
+    ))
+    .unwrap();
+    assert_eq!(config.server.database.cache_kib, 2048);
+    assert_eq!(config.server.database.max_connections, 4);
+    for limits in ["cache_kib=0", "max_connections=0", "max_connections=17"] {
+        assert!(super::parse(&format!("{MINIMAL}\n[server.database]\n{limits}")).is_err());
+    }
+}

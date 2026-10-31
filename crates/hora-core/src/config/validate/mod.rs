@@ -61,6 +61,7 @@ fn validate_routes(
 }
 
 pub(super) fn validate(config: &Config) -> anyhow::Result<()> {
+    config.server.database.validate()?;
     validate_token("server.auth_token", config.server.auth_token.as_ref())?;
     if config.alerts.repeat_alert_secs != 0 {
         validate_period("alerts.repeat_alert_secs", config.alerts.repeat_alert_secs)?;

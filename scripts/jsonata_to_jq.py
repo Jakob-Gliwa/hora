@@ -187,4 +187,24 @@ def emit(node):
 
 
 def translate(source):
-    return emit(Parser(source).parse())
+    node = Parser(source).parse()
+    validate_bindings(node, set())
+    return emit(node)
+
+
+def validate_bindings(node, bound):
+    if node[0] == "var" and node[1] not in bound:
+        raise TranslationError("unbound JSONata variable")
+    if node[0] == "let":
+        bound = set(bound)
+        for name, value in node[1]:
+            if name.startswith("$__"):
+                raise TranslationError("variable name reserved by the translator")
+            validate_bindings(value, bound)
+            bound.add(name)
+        validate_bindings(node[2], bound)
+        return
+    for child in node[1:]:
+        if isinstance(child, tuple): validate_bindings(child, bound)
+        if isinstance(child, list):
+            for item in child: validate_bindings(item, bound)

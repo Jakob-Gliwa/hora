@@ -330,6 +330,9 @@ pub struct Server {
     pub bind: String,
     #[serde(default = "default_database_path")]
     pub database_path: String,
+    /// SQLite page-cache budget; changing it requires a daemon restart.
+    #[serde(default)]
+    pub database: crate::db::PoolSettings,
     #[serde(default)]
     pub allowed_origins: Vec<String>,
     /// Trust this request header for the client IP when rate limiting (e.g.

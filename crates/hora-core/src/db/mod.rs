@@ -183,6 +183,52 @@ fn migrator() -> sqlx::migrate::Migrator {
 ///
 /// Returns an error if the database cannot be opened or migrations fail.
 pub async fn connect(database_path: &str) -> anyhow::Result<Store> {
+    connect_with_settings(database_path, &PoolSettings::default()).await
+}
+
+/// Per-connection SQLite page cache and the maximum number of connections.
+/// Defaults retain the upstream throughput-oriented budget.
+#[derive(Clone, Debug, serde::Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct PoolSettings {
+    pub cache_kib: u32,
+    pub max_connections: u32,
+}
+
+impl Default for PoolSettings {
+    fn default() -> Self {
+        Self {
+            cache_kib: 16_000,
+            max_connections: 8,
+        }
+    }
+}
+
+impl PoolSettings {
+    /// # Errors
+    /// Rejects cache or connection limits outside the supported budget.
+    pub fn validate(&self) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            (256..=65_536).contains(&self.cache_kib),
+            "database cache_kib must be 256..65536"
+        );
+        anyhow::ensure!(
+            (1..=16).contains(&self.max_connections),
+            "database max_connections must be 1..16"
+        );
+        Ok(())
+    }
+}
+
+/// Open the database with an explicit, bounded page-cache budget.
+///
+/// # Errors
+/// Returns an error for invalid limits, unavailable storage or failed migrations.
+pub async fn connect_with_settings(
+    database_path: &str,
+    settings: &PoolSettings,
+) -> anyhow::Result<Store> {
+    settings.validate()?;
     // The database holds failure snippets, push payloads and incident detail, so
     // create it private (0600) rather than at the process umask. SQLite then
     // mirrors that mode onto the -wal/-shm sidecars it spawns.
@@ -197,9 +243,8 @@ pub async fn connect(database_path: &str) -> anyhow::Result<Store> {
         // at worst a power loss drops the last few checks.
         .synchronous(SqliteSynchronous::Normal)
         .busy_timeout(Duration::from_secs(5))
-        // Keep the hot index pages resident across the 5s summary rebuilds
-        // (negative = KiB, so this is 16 MiB rather than the 2 MiB default).
-        .pragma("cache_size", "-16000")
+        // Negative values are KiB. SQLite budgets this per connection.
+        .pragma("cache_size", format!("-{}", settings.cache_kib))
         // A checkpoint rewinds the WAL but leaves the file at its high-water
         // mark, so one burst (long reads pinning a snapshot while the prune
         // writes) kept 100 MB+ on disk. Truncate it back to 64 MiB after a
@@ -209,7 +254,7 @@ pub async fn connect(database_path: &str) -> anyhow::Result<Store> {
     // WAL lets readers run while one writer (the scheduler) inserts, so a roomy
     // pool keeps the parallel summary queries from queueing.
     let pool = SqlitePoolOptions::new()
-        .max_connections(8)
+        .max_connections(settings.max_connections)
         // Fail fast under contention instead of the 30s default; a slow monitor
         // query then degrades just that card, not the whole page.
         .acquire_timeout(Duration::from_secs(10))

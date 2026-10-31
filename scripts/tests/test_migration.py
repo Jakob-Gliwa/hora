@@ -69,7 +69,7 @@ class MigrationTest(unittest.TestCase):
         self.assertTrue(migration.Converter(data).convert()[1]['unmapped'])
 
     def test_unsupported_jsonata_is_rejected(self):
-        for source in ['$eval("x")', '$map($, function($v){$v})', '$round($, 99)', '$a := 1']:
+        for source in ['$eval("x")', '$map($, function($v){$v})', '$round($, 99)', '$a := 1', '$unbound', '($__a := 1; $__a)']:
             with self.assertRaises((TranslationError, IndexError)):
                 translate(source)
 

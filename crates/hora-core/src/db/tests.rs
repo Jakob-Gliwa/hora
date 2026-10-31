@@ -1487,3 +1487,28 @@ async fn the_incident_marks_cache_follows_the_log_like_a_full_read() {
         incident_marks(&store).await.unwrap(),
     );
 }
+
+#[tokio::test]
+async fn configured_page_cache_budget_is_applied_to_every_connection() {
+    let path = std::env::temp_dir().join(format!("hora-cache-budget-{}.db", std::process::id()));
+    let settings = PoolSettings {
+        cache_kib: 512,
+        max_connections: 2,
+    };
+    let store = connect_with_settings(path.to_str().unwrap(), &settings)
+        .await
+        .unwrap();
+    let mut first = store.sqlx().acquire().await.unwrap();
+    let mut second = store.sqlx().acquire().await.unwrap();
+    for connection in [&mut first, &mut second] {
+        let cache: i64 = sqlx::query_scalar("PRAGMA cache_size")
+            .fetch_one(&mut **connection)
+            .await
+            .unwrap();
+        assert_eq!(cache, -512);
+    }
+    drop(first);
+    drop(second);
+    store.close().await;
+    std::fs::remove_file(path).unwrap();
+}

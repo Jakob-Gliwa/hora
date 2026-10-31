@@ -487,3 +487,8 @@ interval_secs = 90000        # max gap before "down" (~25h for a daily job)
 # keyword = "online"
 # interval_secs = 60
 # max_age_secs = 180              # periodic topics; omit for persistent retained state
+
+# Optional low-memory SQLite budget (requires restart):
+# [server.database]
+# cache_kib = 2048
+# max_connections = 4

@@ -263,7 +263,7 @@ class Converter:
         channels = self.channels()
         monitors = [self.monitor(m) for m in self.monitors]
         config = {"page": {"title": "Service status"},
-                  "server": {"bind": "127.0.0.1:8787", "database_path": "hora.db", "auth_token": self.placeholder("HORA_AUTH_TOKEN", "operator/viewer token (generate a new random value)")},
+                  "server": {"bind": "127.0.0.1:8787", "database_path": "hora.db", "database": {"cache_kib": 2048, "max_connections": 4}, "auth_token": self.placeholder("HORA_AUTH_TOKEN", "operator/viewer token (generate a new random value)")},
                   "alerts": {"fail_threshold": 3, "default_retention_days": int(self.data.get("settings", {}).get("keepDataPeriodDays", 90))},
                   "updates": {"check": False}, "channels": channels, "brokers": list(self.brokers.values()),
                   "maintenance": self.maintenance(), "monitors": monitors}

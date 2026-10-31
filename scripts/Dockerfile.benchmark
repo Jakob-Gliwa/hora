@@ -1,0 +1,19 @@
+# Linux/glibc benchmark image; production continues to use the musl Dockerfile.
+FROM rust:1.99.1-slim AS builder
+RUN apt-get update && apt-get install -y --no-install-recommends cmake clang \
+    && rm -rf /var/lib/apt/lists/*
+WORKDIR /build
+COPY Cargo.toml Cargo.lock ./
+COPY crates ./crates
+RUN --mount=type=cache,id=hora-bench-registry,target=/usr/local/cargo/registry \
+    --mount=type=cache,id=hora-bench-target,target=/build/target \
+    --mount=type=secret,id=build_ca \
+    if [ -f /run/secrets/build_ca ]; then export CARGO_HTTP_CAINFO=/run/secrets/build_ca; fi; \
+    cargo build --release --locked -p hora && cp target/release/hora /hora
+
+FROM debian:trixie-slim
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+COPY --from=builder /hora /usr/local/bin/hora
+ENV TOKIO_WORKER_THREADS=2
+ENTRYPOINT ["/usr/local/bin/hora"]
