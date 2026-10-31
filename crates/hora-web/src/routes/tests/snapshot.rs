@@ -134,3 +134,41 @@ async fn bodies_are_rendered_once_per_snapshot_and_audience() {
         "{metrics}"
     );
 }
+
+#[tokio::test]
+async fn bodies_are_gzipped_only_for_clients_that_ask() {
+    let (app, store, _tx) = app_with_reload(TWO).await;
+    insert_up(&store, "web", 42).await;
+    let plain = app.clone().oneshot(get("/api/summary")).await.unwrap();
+    assert!(
+        plain
+            .headers()
+            .get(axum::http::header::CONTENT_ENCODING)
+            .is_none()
+    );
+    let plain = body_text(plain).await;
+
+    let gzipped = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/summary")
+                .header(axum::http::header::ACCEPT_ENCODING, "gzip")
+                .extension(fake_peer())
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        gzipped.headers()[axum::http::header::CONTENT_ENCODING],
+        "gzip"
+    );
+    let bytes = axum::body::to_bytes(gzipped.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    assert!(bytes.len() < plain.len(), "gzip did not shrink the summary");
+    let mut unzipped = String::new();
+    std::io::Read::read_to_string(&mut flate2::read::GzDecoder::new(&bytes[..]), &mut unzipped)
+        .unwrap();
+    assert_eq!(unzipped, plain);
+}

@@ -1,19 +1,27 @@
-//! The status summary, kept fresh in the background and served from memory.
+//! The status summary, built in the background on demand and served from memory.
 //!
 //! Building the summary reads the database (milliseconds to seconds,
-//! depending on its size); serving it must not. A refresher task rebuilds
-//! the operator's view continuously and swaps it in whole; a request only
-//! ever loads the latest snapshot (stale-while-revalidate) - the very first
-//! one after start waits for the first build, nothing waits after that. Every
-//! audience's view, and every rendered body (page, text, JSON, metrics), is
-//! derived from that one build in memory, at most once per snapshot.
+//! depending on its size); serving it should not. A refresher task builds
+//! the operator's view and swaps it in whole; a request loads the latest
+//! snapshot. Every audience's view, and every rendered body (page, text,
+//! JSON, metrics), is derived from that one build in memory, at most once per
+//! snapshot.
 //!
-//! Each build starts at most every [`MIN_REFRESH`], and never sooner than its
-//! own duration after the previous one ended: on a database slow enough that
-//! a build takes longer than that, the refresher idles at least half the
-//! time instead of keeping a connection and a core busy forever. A config
-//! reload, or an operator write that must show at once (an announcement, an
-//! event marker), starts a build immediately.
+//! Builds follow demand instead of running continuously: nobody looking at
+//! the page should cost a core. A request finding a snapshot older than
+//! [`MIN_REFRESH`] wakes the refresher and is answered from the current one
+//! (stale-while-revalidate), unless that is older than [`STALE_ON_DEMAND`]:
+//! then it waits (at most [`DEMAND_WAIT`]) for the fresh build, so a viewer
+//! returning after a quiet hour never sees an old status. Without requests,
+//! the refresher rebuilds every [`IDLE_REFRESH`] to keep its incremental
+//! caches warm. The very first request after start waits for the first build.
+//!
+//! A build never starts sooner than its own duration after the previous one
+//! ended: on a database slow enough that a build takes longer than
+//! [`MIN_REFRESH`], the refresher idles at least half the time instead of
+//! keeping a connection and a core busy forever. A config reload, or an
+//! operator write that must show at once (an announcement, an event marker),
+//! starts a build immediately.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -33,8 +41,14 @@ use crate::layout::Spliced;
 use crate::summary::{BuildState, Built, Summary, build_summary, derive};
 use crate::visibility::{Audience, Visibility};
 
-/// The shortest pause between two builds' starts.
+/// A snapshot younger than this is served without waking the refresher.
 pub(crate) const MIN_REFRESH: Duration = Duration::from_secs(5);
+/// Older than this, a request waits (bounded) for the build it triggered.
+pub(crate) const STALE_ON_DEMAND: Duration = Duration::from_secs(30);
+/// The longest a request waits for that build before taking the old one.
+const DEMAND_WAIT: Duration = Duration::from_secs(5);
+/// Rebuild cadence while nobody requests anything (keeps caches warm).
+pub(crate) const IDLE_REFRESH: Duration = Duration::from_mins(5);
 /// How long an operator write waits for the build that shows it.
 const WRITE_VISIBLE_TIMEOUT: Duration = Duration::from_mins(1);
 
@@ -173,6 +187,13 @@ pub(crate) struct Refresher {
     started: AtomicU64,
     wake: Arc<Notify>,
     spawned: AtomicBool,
+    /// Reference point for `published_ms` (monotonic).
+    epoch: Instant,
+    /// When the latest snapshot was published, in ms since `epoch`.
+    published_ms: AtomicU64,
+    /// A build is running: its result answers waiting requests, so they
+    /// need not queue another one right behind it.
+    building: AtomicBool,
 }
 
 impl Default for Refresher {
@@ -183,6 +204,12 @@ impl Default for Refresher {
             started: AtomicU64::new(0),
             wake: Arc::new(Notify::new()),
             spawned: AtomicBool::new(false),
+            // An hour back, so a test can date a snapshot into the past.
+            epoch: Instant::now()
+                .checked_sub(Duration::from_secs(3600))
+                .unwrap_or_else(Instant::now),
+            published_ms: AtomicU64::new(0),
+            building: AtomicBool::new(false),
         }
     }
 }
@@ -204,11 +231,52 @@ impl Refresher {
         tokio::spawn(run(refresher, wake, store, config, notifier, vantage));
     }
 
-    /// The latest snapshot. Never waits on a build, except for the very
-    /// first one after start.
+    fn elapsed_ms(&self) -> u64 {
+        u64::try_from(self.epoch.elapsed().as_millis()).unwrap_or(u64::MAX)
+    }
+
+    /// Date the latest snapshot `ago` into the past.
+    #[cfg(test)]
+    fn pretend_published_ago(&self, ago: Duration) {
+        let ago = u64::try_from(ago.as_millis()).unwrap_or(u64::MAX);
+        self.published_ms
+            .store(self.elapsed_ms().saturating_sub(ago), Ordering::Release);
+    }
+
+    /// How old the latest published snapshot is.
+    fn age(&self) -> Duration {
+        Duration::from_millis(
+            self.elapsed_ms()
+                .saturating_sub(self.published_ms.load(Ordering::Acquire)),
+        )
+    }
+
+    /// The latest snapshot. A stale one wakes the refresher; only a very
+    /// stale one (and the first one after start) waits for the next build.
     pub(crate) async fn snapshot(self: &Arc<Self>, state: &AppState) -> Arc<Snapshot> {
         if let Some(snapshot) = self.current.load_full() {
-            return snapshot;
+            let age = self.age();
+            if age < MIN_REFRESH {
+                return snapshot;
+            }
+            let mut published = self.published.subscribe();
+            let target = *published.borrow_and_update() + 1;
+            self.start(state);
+            if !self.building.load(Ordering::Acquire) {
+                self.wake.notify_one();
+            }
+            if age < STALE_ON_DEMAND {
+                return snapshot;
+            }
+            let fresh = tokio::time::timeout(
+                DEMAND_WAIT,
+                published.wait_for(|&generation| generation >= target),
+            )
+            .await;
+            return match fresh {
+                Ok(_) => self.current.load_full().unwrap_or(snapshot),
+                Err(_) => snapshot,
+            };
         }
         self.start(state);
         let mut published = self.published.subscribe();
@@ -263,6 +331,7 @@ async fn run(
             state = BuildState::default();
         }
         built_for = Some(Arc::clone(&current));
+        this.building.store(true, Ordering::Release);
         let generation = this.started.fetch_add(1, Ordering::AcqRel) + 1;
         let began = Instant::now();
         // Channel health is read live from the dispatcher; the vantage map is
@@ -284,6 +353,8 @@ async fn run(
             Ok((kept, built)) => {
                 state = kept;
                 this.current.store(Some(Arc::new(Snapshot::new(built))));
+                this.published_ms
+                    .store(this.elapsed_ms(), Ordering::Release);
                 this.published.send_replace(generation);
                 let took = began.elapsed();
                 if generation == 1 {
@@ -298,16 +369,21 @@ async fn run(
                 began.elapsed()
             }
         };
+        this.building.store(false, Ordering::Release);
         drop(this);
+        let ended = Instant::now();
 
-        let pause = MIN_REFRESH.saturating_sub(took).max(took);
+        // Idle until a request finds the snapshot stale, an operator write or
+        // a reload asks for one, or the keep-warm period is over.
         tokio::select! {
-            () = tokio::time::sleep(pause) => {}
+            () = tokio::time::sleep(IDLE_REFRESH.max(took)) => {}
             () = wake.notified() => {}
             changed = config.changed(), if reloads => {
                 reloads = changed.is_ok();
             }
         }
+        // Never sooner than the last build's own duration after it ended.
+        tokio::time::sleep(took.saturating_sub(ended.elapsed())).await;
     }
 }
 
@@ -318,4 +394,102 @@ fn adds_monitors(previous: &Config, next: &Config) -> bool {
     next.monitors
         .iter()
         .any(|monitor| !known.contains(monitor.id.as_str()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::AtomicU64;
+
+    const ONE: &str = r#"
+        [page]
+        [server]
+        [[monitors]]
+        id = "web"
+        name = "Web"
+        target = "https://example.com"
+        interval_secs = 60
+    "#;
+
+    async fn state() -> (AppState, Store, watch::Sender<Arc<Config>>) {
+        let store = Store::in_memory().await;
+        let config = Arc::new(hora_core::config::parse(ONE).expect("config"));
+        let client = hora_core::http::client(None).expect("client");
+        let notifier = hora_core::notifications::shared(&config, &client);
+        let (tx, rx) = watch::channel(config);
+        let tick = u64::try_from(chrono::Utc::now().timestamp()).unwrap_or(0);
+        let state = AppState::new(store.clone(), rx, Arc::new(AtomicU64::new(tick)), notifier);
+        (state, store, tx)
+    }
+
+    fn generation(state: &AppState) -> u64 {
+        *state.refresher.published.borrow()
+    }
+
+    async fn latency(state: &AppState) -> Option<i64> {
+        let config = state.config.borrow().clone();
+        let summary = state.snapshot().await.summary(&config, &Audience::Operator);
+        summary.monitors[0].last_latency_ms
+    }
+
+    /// A check `ago` seconds back (one row per monitor and second).
+    async fn insert_up(store: &Store, latency: i64, ago: i64) {
+        sqlx::query(
+            "INSERT INTO checks (time, monitor_id, status, latency_ms) VALUES (?, 'web', 1, ?)",
+        )
+        .bind(chrono::Utc::now().timestamp() - ago)
+        .bind(latency)
+        .execute(store.fixture_pool())
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn nobody_looking_means_no_rebuilds() {
+        let (state, _store, _tx) = state().await;
+        state.snapshot().await;
+        assert_eq!(generation(&state), 1);
+        // The old refresher rebuilt every MIN_REFRESH regardless of viewers.
+        tokio::time::sleep(MIN_REFRESH + Duration::from_secs(1)).await;
+        assert_eq!(generation(&state), 1, "rebuilt without a request");
+    }
+
+    #[tokio::test]
+    async fn a_stale_view_is_served_at_once_and_refreshed_behind_it() {
+        let (state, store, _tx) = state().await;
+        insert_up(&store, 42, 10).await;
+        assert_eq!(latency(&state).await, Some(42));
+        insert_up(&store, 7, 0).await;
+        state
+            .refresher
+            .pretend_published_ago(MIN_REFRESH + Duration::from_secs(1));
+        // Served from the current snapshot, without waiting...
+        assert_eq!(latency(&state).await, Some(42));
+        // ...while the refresher builds the next one in the background.
+        let rebuilt = tokio::time::timeout(Duration::from_secs(4), async {
+            while generation(&state) < 2 {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await;
+        assert!(rebuilt.is_ok(), "the stale view did not wake the refresher");
+        assert_eq!(latency(&state).await, Some(7));
+    }
+
+    #[tokio::test]
+    async fn a_view_after_a_quiet_spell_waits_for_the_fresh_build() {
+        let (state, store, _tx) = state().await;
+        insert_up(&store, 42, 10).await;
+        assert_eq!(latency(&state).await, Some(42));
+        insert_up(&store, 7, 0).await;
+        state
+            .refresher
+            .pretend_published_ago(STALE_ON_DEMAND + Duration::from_secs(1));
+        assert_eq!(
+            latency(&state).await,
+            Some(7),
+            "served a snapshot older than STALE_ON_DEMAND"
+        );
+        assert_eq!(generation(&state), 2);
+    }
 }

@@ -14,6 +14,7 @@ use tower_http::classify::{
     ClassifiedResponse, ClassifyResponse, NeverClassifyEos, ServerErrorsAsFailures,
     ServerErrorsFailureClass, SharedClassifier,
 };
+use tower_http::compression::CompressionLayer;
 use tower_http::cors::{Any, CorsLayer};
 use tower_http::set_header::SetResponseHeaderLayer;
 use tower_http::trace::TraceLayer;
@@ -103,6 +104,10 @@ pub fn router(state: AppState) -> Router {
         .route("/api/openapi.json", get(openapi))
         .merge(pages)
         .merge(api)
+        // gzip for clients that ask: /api/summary carries months of history per
+        // monitor (hundreds of KB), the page and /metrics tens of KB. Tiny and
+        // already-compressed responses (images) are left alone.
+        .layer(CompressionLayer::new())
         .layer(SetResponseHeaderLayer::overriding(
             header::CONTENT_SECURITY_POLICY,
             HeaderValue::from_static(CSP),
