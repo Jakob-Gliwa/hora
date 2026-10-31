@@ -3,10 +3,12 @@
 GitHub Actions publishes `ghcr.io/jakob-gliwa/hora:main` after the tests and
 security checks pass. The image targets `linux/amd64` for Unraid and builds natively without QEMU.
 Docs changes do not trigger image builds; no GitHub Pages deployment runs.
-CI compiles the release binary natively with Rust 1.99.1 and persists Cargo
-registry and build artifacts using rust-cache. Docker receives only that binary,
-so its context cannot contain private configuration. Local `docker build .`
-still compiles from source.
+CI compiles a fully static musl release binary with Rust 1.99.1 in Alpine,
+caches the Cargo registry and build directory, and copies only that binary into
+an Alpine runtime image (about 20 MB), so the context cannot contain private
+configuration. The image is smoke-tested before it is pushed, so a broken build
+never reaches the `main` tag. Local `docker build .` still compiles from source.
+A weekly workflow opens an issue when a newer upstream release is not merged yet.
 For a fixed version, use `ghcr.io/jakob-gliwa/hora:sha-<full-commit-sha>`.
 The image contains only the application, never installation configuration.
 
@@ -16,7 +18,7 @@ In Unraid, use **Docker → Add Container**:
 | --- | --- |
 | Name | `hora` |
 | Repository | `ghcr.io/jakob-gliwa/hora:main` |
-| Network type | Bridge |
+| Network type | Bridge, or a custom network (e.g. `br0`) if monitored services are only reachable there |
 | Container port | `8787` TCP; choose an unused host port |
 | Config file mapping | Your private `config.toml` → `/etc/hora/config.toml`, read-only |
 | Data directory mapping | Your appdata directory → `/data`, read/write |

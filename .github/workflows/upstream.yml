@@ -1,0 +1,48 @@
+name: Upstream releases
+
+# The fork does not receive upstream releases (often security fixes) by itself.
+# Weekly, and on demand, open an issue when the latest uplg/hora release is not
+# yet merged into main. One open issue per release; nothing is merged automatically.
+on:
+  schedule:
+    - cron: "0 7 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  check:
+    if: github.repository == 'Jakob-Gliwa/hora'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Compare with the latest upstream release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag=$(gh api repos/uplg/hora/releases/latest --jq .tag_name)
+          git fetch --quiet --no-tags https://github.com/uplg/hora.git "refs/tags/$tag:refs/upstream/$tag"
+          if git merge-base --is-ancestor "refs/upstream/$tag" HEAD; then
+            echo "main already contains upstream $tag"
+            exit 0
+          fi
+          title="Upstream $tag is not merged yet"
+          if gh issue list --state open --search "\"$title\" in:title" --json number --jq '.[0].number' | grep -q .; then
+            echo "issue for $tag already open"
+            exit 0
+          fi
+          behind=$(git rev-list --count "HEAD..refs/upstream/$tag")
+          gh issue create --title "$title" --body "$(printf '%s\n' \
+            "uplg/hora released [$tag](https://github.com/uplg/hora/releases/tag/$tag); main is $behind upstream commit(s) behind." \
+            "" \
+            "Release notes may contain security fixes. Merge the tag locally, resolve conflicts, run the tests and push:" \
+            "" \
+            '```sh' \
+            "git fetch https://github.com/uplg/hora.git tag $tag" \
+            "git merge $tag" \
+            '```')"
