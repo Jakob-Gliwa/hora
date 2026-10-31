@@ -5,7 +5,7 @@ use serde::Deserialize;
 
 use super::{Compiled, parse_cron};
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(try_from = "RawMaintenance")]
 pub struct Maintenance {
     pub title: String,
@@ -13,7 +13,7 @@ pub struct Maintenance {
     timing: Timing,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum Timing {
     Fixed {
         start: DateTime<Utc>,

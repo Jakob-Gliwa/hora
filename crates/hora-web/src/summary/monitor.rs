@@ -31,31 +31,10 @@ pub(crate) struct MonitorData<'a> {
     pub(super) certs: &'a HashMap<String, i64>,
     /// Each monitor's open incident and last finished one.
     pub(super) marks: &'a HashMap<String, db::IncidentMarks>,
-    /// The configured maintenance windows, to mark the days they touched.
-    pub(super) maintenance: &'a [hora_core::config::Maintenance],
+    /// Cached calendar days touched by each configured maintenance window.
+    pub(super) maintenance: &'a super::maintenance::MaintenanceCalendar,
     /// The peers' view of shared targets, from the daemon's vantage poller.
     pub(super) vantage: &'a HashMap<String, Vec<hora_core::mesh::vantage::PeerVantage>>,
-}
-
-/// Mark the bar's days a configured maintenance window covering `id` touched
-/// (the windows stay in the config after they end, so past ones show too).
-fn mark_maintenance(
-    bar: &mut [super::view::DayCell],
-    windows: &[hora_core::config::Maintenance],
-    id: &str,
-) {
-    for window in windows
-        .iter()
-        .filter(|window| window.monitors.is_empty() || window.monitors.iter().any(|m| m == id))
-    {
-        for cell in bar.iter_mut() {
-            if chrono::NaiveDate::parse_from_str(&cell.date, "%Y-%m-%d")
-                .is_ok_and(|day| window.touches_utc_day(day))
-            {
-                cell.maint = true;
-            }
-        }
-    }
 }
 
 /// Availability over the bar's days: up or slow checks over all of them.
@@ -105,7 +84,7 @@ pub(crate) fn build_monitor_view(
         .map(Vec::as_slice)
         .unwrap_or_default();
     let mut bar = build_bar(daily, ctx.now, ctx.history_days);
-    mark_maintenance(&mut bar, data.maintenance, &monitor.id);
+    data.maintenance.mark(&mut bar, &monitor.id);
     let uptime_long_permille = long_uptime(daily, &bar);
 
     // Kept as points, not drawn: only the monitor's own page shows the

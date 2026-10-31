@@ -6,6 +6,7 @@
 //! and the status/label helpers shared with the other views in `status`.
 //! The refresher that calls them, off the request path, is `crate::snapshot`.
 
+mod maintenance;
 mod monitor;
 mod status;
 #[cfg(test)]
@@ -54,6 +55,7 @@ pub(crate) struct BuildState {
     sparklines: db::SparklineCache,
     daily: db::DailyCache,
     marks: db::IncidentMarksCache,
+    maintenance: maintenance::MaintenanceCalendar,
 }
 
 /// One build: the operator's summary, plus every configured monitor's status
@@ -141,7 +143,9 @@ pub(crate) async fn build_summary(
         sparklines,
         daily,
         marks,
+        maintenance,
     } = state;
+    maintenance.refresh(&config.maintenance, now.date_naive(), ctx.history_days);
     let (window, daily, sparklines, certs, recent, events, marks, logged) = tokio::join!(
         window.refresh(store, since_24h, timestamp),
         daily.refresh(store, since_history, timestamp),
@@ -171,7 +175,7 @@ pub(crate) async fn build_summary(
         sparklines: &sparklines,
         certs: &certs,
         marks: &marks,
-        maintenance: &config.maintenance,
+        maintenance,
         vantage,
     };
 
