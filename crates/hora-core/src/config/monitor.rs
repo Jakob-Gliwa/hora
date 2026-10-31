@@ -287,6 +287,8 @@ pub struct DnsSpec {
 /// A passive heartbeat: the job pings `/api/push/{id}`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PushSpec {
+    /// Follow-up cadence while unhealthy or holding a muted recovery. Healthy
+    /// watches use committed-push events and the heartbeat deadline instead.
     pub poll_secs: Option<u64>,
     pub kuma_compatible: bool,
     /// Heartbeats expected per cron run rather than every interval.
@@ -523,7 +525,7 @@ impl Monitor {
         self.fail_threshold.unwrap_or(default).max(1)
     }
 
-    /// Evaluation cadence; a passive heartbeat deadline need not be its polling period.
+    /// Active probe cadence, or a push watch's failure/reminder follow-up period.
     #[must_use]
     pub fn poll_interval(&self) -> Duration {
         match &self.spec {

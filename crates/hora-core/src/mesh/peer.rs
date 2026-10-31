@@ -78,8 +78,9 @@ pub async fn report(store: &Store, config: &Config, last_tick: &AtomicU64) -> He
 /// tick. The liveness beacon (`last_tick`) advances at the cadence of the
 /// *fastest* monitor (it is a `fetch_max` across all of them), so the tolerance is
 /// derived from the smallest interval - not the largest, which would let a slow
-/// daily monitor mask a wedged scheduler for hours. A node with no monitors has
-/// nothing to go stale, so it is trivially alive.
+/// daily monitor mask a wedged scheduler for hours. Idle push tasks update the
+/// beacon on their cheap clock check, without polling SQLite. A node with no
+/// monitors has nothing to go stale, so it is trivially alive.
 pub(crate) fn scheduler_liveness(config: &Config, last_tick: &AtomicU64, now: i64) -> (bool, i64) {
     let last = last_tick.load(Ordering::Relaxed);
     if last == 0 {
@@ -90,7 +91,13 @@ pub(crate) fn scheduler_liveness(config: &Config, last_tick: &AtomicU64, now: i6
     let Some(min_interval) = config
         .monitors
         .iter()
-        .map(|monitor| monitor.interval_secs)
+        .map(|monitor| {
+            if matches!(monitor.spec, crate::config::MonitorKind::Push(_)) {
+                crate::scheduler::PUSH_CLOCK_CHECK_SECS
+            } else {
+                monitor.interval_secs
+            }
+        })
         .min()
     else {
         return (true, age);
@@ -563,6 +570,17 @@ mod tests {
         let (ok, age) = scheduler_liveness(&config, &AtomicU64::new(0), 1000);
         assert!(ok);
         assert_eq!(age, -1);
+    }
+
+    #[test]
+    fn push_liveness_uses_the_idle_beacon_instead_of_the_heartbeat_deadline() {
+        let config = cfg(
+            "[page]\n[server]\n[[monitors]]\nid='job'\nname='Job'\nkind='push'\ninterval_secs=86400\npush_poll_secs=1",
+        );
+        let tick = AtomicU64::new(1000);
+        assert_eq!(scheduler_liveness(&config, &tick, 1061), (true, 61));
+        assert!(!scheduler_liveness(&config, &tick, 1121).0);
+        assert!(!scheduler_liveness(&config, &AtomicU64::new(0), 1000).0);
     }
 
     #[test]

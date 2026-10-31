@@ -21,6 +21,17 @@ pub(crate) enum Cadence {
 }
 
 impl Cadence {
+    /// First UTC second that is late, preserving the strict `now > deadline`
+    /// rule used by polling. `None` means no computable future cron run.
+    pub(crate) fn deadline(&self, since: i64, seen: bool) -> Option<i64> {
+        let deadline = match self {
+            Self::Every(seconds) => since.checked_add(i64::try_from(*seconds).ok()?)?,
+            Self::Cron { cron, grace_secs } => cron_due(cron, since, seen.then_some(*grace_secs))?
+                .checked_add(i64::try_from(*grace_secs).ok()?)?,
+        };
+        deadline.checked_add(1)
+    }
+
     /// Why a heartbeat last seen at `since` is overdue at `now`, or `None`
     /// while it is on time. `seen` says whether `since` is a real heartbeat
     /// (or only when one was first expected): only a real one may count for
@@ -233,14 +244,33 @@ pub(crate) async fn heartbeat_outcome_for(
     expected_since: i64,
     now: i64,
 ) -> Option<Outcome> {
-    let last = match db::last_heartbeat(store, id).await {
-        Ok(last) => last,
+    match heartbeat_evaluation_for(store, id, cadence, expected_since, now).await {
+        Ok(evaluation) => evaluation.outcome,
         Err(err) => {
             error!(monitor = %id, "failed to read last heartbeat: {err:#}");
-            return None;
+            None
         }
-    };
-    match judge_heartbeat(cadence, last.as_ref(), expected_since, now) {
+    }
+}
+
+pub(crate) struct HeartbeatEvaluation {
+    pub(crate) outcome: Option<Outcome>,
+    pub(crate) deadline: Option<i64>,
+}
+
+pub(crate) async fn heartbeat_evaluation_for(
+    store: &Store,
+    id: &str,
+    cadence: &Cadence,
+    expected_since: i64,
+    now: i64,
+) -> db::Result<HeartbeatEvaluation> {
+    let last = db::last_heartbeat(store, id).await?;
+    let deadline = cadence.deadline(
+        last.as_ref().map_or(expected_since, |beat| beat.time),
+        last.is_some(),
+    );
+    let outcome = match judge_heartbeat(cadence, last.as_ref(), expected_since, now) {
         HeartbeatVerdict::Unknown => None,
         HeartbeatVerdict::OnTime(outcome) => Some(outcome),
         HeartbeatVerdict::Overdue(kind, reason) => {
@@ -251,12 +281,27 @@ pub(crate) async fn heartbeat_outcome_for(
             }
             Some(Outcome::down(kind, reason))
         }
-    }
+    };
+    Ok(HeartbeatEvaluation { outcome, deadline })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn deadlines_match_existing_verdicts_including_early_cron_pings() {
+        for cadence in [Cadence::Every(60), nightly()] {
+            for since in [0, 86_400 + 3 * 3600 - 1, 86_400 + 3 * 3600 + 120] {
+                for seen in [false, true] {
+                    let deadline = cadence.deadline(since, seen).expect("next deadline");
+                    assert!(cadence.overdue(since, seen, deadline - 1).is_none());
+                    assert!(cadence.overdue(since, seen, deadline).is_some());
+                }
+            }
+        }
+        assert_eq!(Cadence::Every(60).deadline(i64::MAX, true), None);
+    }
 
     #[test]
     fn the_grace_reads_as_configured() {

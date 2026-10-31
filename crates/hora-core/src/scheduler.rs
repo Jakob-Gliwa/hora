@@ -1,5 +1,8 @@
 //! The scheduler: one independent probing loop per monitor, plus alert state.
 
+mod push;
+pub(crate) use push::CLOCK_CHECK_SECS as PUSH_CLOCK_CHECK_SECS;
+
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 
@@ -12,7 +15,6 @@ use tracing::{error, info, warn};
 
 use crate::coalesce::{AlertMsg, DownAlert};
 use crate::config::{Config, Monitor, MonitorKind, NetworkProbe};
-use crate::heartbeat::{HeartbeatWatch, heartbeat_outcome_for};
 use crate::notifications::Notifiers;
 use crate::probe::Outcome;
 use crate::status::MonitorState;
@@ -212,7 +214,7 @@ fn send_alert(alerts: &mpsc::UnboundedSender<AlertMsg>, monitor_id: &str, messag
 #[allow(clippy::too_many_lines)]
 async fn run(
     monitor: Monitor,
-    config: watch::Receiver<Arc<Config>>,
+    mut config: watch::Receiver<Arc<Config>>,
     deps: MonitorDeps,
     mut shutdown: watch::Receiver<bool>,
 ) {
@@ -232,12 +234,15 @@ async fn run(
     // every aligned tick forever. The offset is a stable hash of the id (same
     // phase across restarts), capped so a long-interval monitor still gets its
     // first check within a minute of starting.
-    let offset = stagger_offset(&monitor.id, monitor.poll_interval());
-    let mut ticker = tokio::time::interval_at(
-        tokio::time::Instant::now() + offset,
-        monitor.poll_interval(),
-    );
-    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let mut ticker = (!matches!(monitor.spec, MonitorKind::Push(_))).then(|| {
+        let offset = stagger_offset(&monitor.id, monitor.poll_interval());
+        let mut ticker = tokio::time::interval_at(
+            tokio::time::Instant::now() + offset,
+            monitor.poll_interval(),
+        );
+        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        ticker
+    });
     // The exec directory comes from the environment (immutable for the process
     // lifetime), so one read outlives every config reload.
     let exec_dir = config.borrow().exec_dir.clone();
@@ -278,15 +283,26 @@ async fn run(
     // Push monitors are judged from stored heartbeats against their cadence,
     // counted from the first heartbeat expected (persisted, so a monitor that
     // never pinged still alerts across restarts).
-    let heartbeat = match &monitor.spec {
-        MonitorKind::Push(push) => Some(HeartbeatWatch::for_monitor(&store, &monitor, push).await),
+    let mut heartbeat = match &monitor.spec {
+        MonitorKind::Push(spec) => Some(push::PushDriver::new(&store, &monitor, spec).await),
         _ => None,
     };
 
     loop {
-        tokio::select! {
-            _ = ticker.tick() => {}
-            _ = shutdown.changed() => break,
+        if let Some(push) = &mut heartbeat {
+            tokio::select! {
+                () = push.wait(&last_tick) => {}
+                changed = config.changed() => {
+                    if changed.is_err() { break; }
+                }
+                _ = shutdown.changed() => break,
+            }
+        } else {
+            let ticker = ticker.as_mut().expect("active monitor ticker");
+            tokio::select! {
+                _ = ticker.tick() => {}
+                _ = shutdown.changed() => break,
+            }
         }
         // Liveness beacon: record that this scheduler loop iterated, independent of
         // the probe outcome (a hung probe never reaches here, so the timestamp goes
@@ -299,16 +315,12 @@ async fn run(
 
         // No outcome means a push monitor still inside its first expected
         // window (or a read error): status stays unknown, nothing to react to.
-        let Some(outcome) = tick_outcome(
-            &client,
-            &store,
-            &monitor,
-            exec_dir.as_deref(),
-            heartbeat.as_ref(),
-            &mqtt,
-        )
-        .await
-        else {
+        let outcome = if let Some(push) = &mut heartbeat {
+            push.evaluate(&store, &monitor).await
+        } else {
+            tick_outcome(&client, &store, &monitor, exec_dir.as_deref(), &mqtt).await
+        };
+        let Some(outcome) = outcome else {
             continue;
         };
 
@@ -325,8 +337,8 @@ async fn run(
         }
 
         let (muted, threshold, alert_on_degraded) = alert_settings(&config, &monitor.id);
-        if let Some(retry) = monitor.retry_interval_secs {
-            let pending = !outcome.is_up() && state.consecutive_down.saturating_add(1) < threshold;
+        let pending = !outcome.is_up() && state.consecutive_down.saturating_add(1) < threshold;
+        if let (Some(ticker), Some(retry)) = (&mut ticker, monitor.retry_interval_secs) {
             ticker.reset_after(if pending {
                 std::time::Duration::from_secs(retry)
             } else {
@@ -344,6 +356,9 @@ async fn run(
             close_open_incident(&store, &monitor.id, &mut open_incident).await;
         }
 
+        if let Some(push) = &mut heartbeat {
+            push.plan(&monitor, &outcome, state != AlertState::default(), pending);
+        }
         if muted {
             // Checks are still recorded above; only alert transitions are skipped.
             continue;
@@ -458,6 +473,9 @@ async fn run(
         // Written back right after the side effect, with no `.await` in
         // between: see [`AlertCell`].
         alert_state.set(state);
+        if let Some(push) = &mut heartbeat {
+            push.plan(&monitor, &outcome, state != AlertState::default(), pending);
+        }
         if state.last_down_alert != saved_alert {
             if let Some(at) = state.last_down_alert
                 && let Err(err) = db::meta_set(&store, &repeat_key, &at.to_string()).await
@@ -744,22 +762,10 @@ async fn tick_outcome(
     store: &Store,
     monitor: &Monitor,
     exec_dir: Option<&std::path::Path>,
-    heartbeat: Option<&HeartbeatWatch>,
     mqtt: &crate::mqtt::MqttHub,
 ) -> Option<Outcome> {
     let outcome = match &monitor.spec {
-        MonitorKind::Push(_) => {
-            // Built with the task for every push monitor.
-            let watch = heartbeat?;
-            return heartbeat_outcome_for(
-                store,
-                &monitor.id,
-                &watch.cadence,
-                watch.expected_since,
-                chrono::Utc::now().timestamp(),
-            )
-            .await;
-        }
+        MonitorKind::Push(_) => return None, // Evaluated by the event/deadline driver.
         MonitorKind::Exec(spec) => match exec_dir {
             Some(dir) => crate::exec::run(dir, monitor, spec).await,
             // Config validation guarantees the directory; defensive only.

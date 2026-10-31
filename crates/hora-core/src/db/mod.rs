@@ -46,6 +46,7 @@ mod certs;
 mod checks;
 mod compact;
 mod incidents;
+mod push_updates;
 mod release;
 mod retention;
 #[cfg(test)]
@@ -81,6 +82,7 @@ pub use incidents::{
     latest_incident_id, monitor_incidents, recent_incidents, set_incident_local_only,
     set_incident_note, update_incident_end, update_incident_vantage,
 };
+pub(crate) use push_updates::PushSubscription;
 pub use release::{StoredRelease, mark_release_notified, release_watch, upsert_release_watch};
 pub(crate) use retention::prune;
 pub use retention::{
@@ -114,9 +116,25 @@ pub type Result<T, E = Error> = std::result::Result<T, E>;
 #[derive(Clone, Debug)]
 pub struct Store {
     pool: SqlitePool,
+    push_updates: std::sync::Arc<push_updates::PushUpdates>,
+    #[cfg(test)]
+    pub(crate) heartbeat_reads: std::sync::Arc<std::sync::atomic::AtomicU64>,
 }
 
 impl Store {
+    fn from_pool(pool: SqlitePool) -> Self {
+        Self {
+            pool,
+            push_updates: std::sync::Arc::default(),
+            #[cfg(test)]
+            heartbeat_reads: std::sync::Arc::default(),
+        }
+    }
+
+    pub(crate) fn subscribe_push(&self, id: &str) -> PushSubscription {
+        self.push_updates.subscribe(id)
+    }
+
     /// The sqlx pool, for the query functions of this module only.
     pub(crate) fn sqlx(&self) -> &SqlitePool {
         &self.pool
@@ -160,7 +178,7 @@ impl Store {
             .run(&pool)
             .await
             .expect("migrate in-memory database");
-        Self { pool }
+        Self::from_pool(pool)
     }
 
     /// The raw pool, for test fixtures that insert rows no public function
@@ -269,7 +287,7 @@ pub async fn connect_with_settings(
     // re-runs ANALYZE when the shape of the data has drifted, so on most boots
     // this is a no-op; the first one pays a sub-second full ANALYZE.
     sqlx::query("PRAGMA optimize").execute(&pool).await?;
-    Ok(Store { pool })
+    Ok(Store::from_pool(pool))
 }
 
 /// Create the database file with owner-only (0600) permissions before sqlx opens
