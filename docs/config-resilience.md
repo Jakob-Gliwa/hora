@@ -37,6 +37,27 @@ notify = ["pushover-high"] # default: every channel
 # repeat_alert_secs = 21600
 ```
 
+## Live reload
+
+Hora applies an edited `config.toml` within a second: it watches the file's
+directory with inotify, so writing in place, saving through a temporary file
+and a rename, and a swapped symlink (a Kubernetes `ConfigMap`) all arrive.
+`SIGHUP` reloads as well. Unchanged content is ignored.
+
+Where that cannot work, the configuration monitor is down with a `live reload`
+issue, rather than edits silently never arriving:
+
+| Situation | Why edits do not arrive | Fix |
+| --- | --- | --- |
+| `config.toml` mounted into a container on its own | No directory events; a file replaced on the host becomes unreadable (`Stale file handle`) | Mount the directory: `…/hora/config:/etc/hora` |
+| The file is on NFS/SMB/9p/sshfs | Changes made on another machine raise no event | Keep it on a local disk, or send `SIGHUP` |
+| The watcher cannot start (e.g. inotify limit reached) | No events at all | Raise `fs.inotify.max_user_watches` |
+
+A file that becomes unreadable is reported the same way, and the monitors keep
+running as loaded before. If a change still slips past the watcher, the
+[self-check](self-check.md) notices within two minutes, applies it and reports
+the miss.
+
 ## What has no partial form
 
 - **The file cannot be read, has a TOML syntax error, or a global section

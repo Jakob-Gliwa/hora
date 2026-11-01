@@ -14,6 +14,9 @@ process, a wedged scheduler and a broken database. The built-in monitor
   failed deliveries in a row.
 - **A stopped alert coalescer**, after which no down or recovered alert is
   delivered until restart.
+- **A config edit no file event announced**: `config.toml` differs from the
+  applied configuration on two checks in a row. The self-check applies it and
+  reports the miss for an hour, since live reload is not reliable there.
 
 While anything is found, `hora-self` is down with every finding in its message
 and alerts like any other monitor. It recovers on its own. It is fed by Hora

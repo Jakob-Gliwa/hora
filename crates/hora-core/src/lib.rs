@@ -6,6 +6,7 @@ pub mod cert;
 pub mod coalesce;
 pub mod config;
 pub mod config_status;
+pub mod config_watch;
 mod connect;
 pub mod db;
 pub mod digest;

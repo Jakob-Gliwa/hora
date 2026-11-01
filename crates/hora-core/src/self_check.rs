@@ -3,7 +3,8 @@
 //! The dead-man heartbeat catches a dead process, a wedged scheduler and a
 //! broken database. What it cannot see is subtler: one monitor that silently
 //! stopped checking, a monitor task stuck in a panic/restart loop, a
-//! notification channel that keeps failing. Every minute this task looks for
+//! notification channel that keeps failing, a config edit the file watcher
+//! never announced. Every minute this task looks for
 //! those and reports them through the self-check monitor (down while any is
 //! present), so they alert like an outage.
 //!
@@ -21,6 +22,7 @@ use tokio::task::JoinHandle;
 use tracing::{error, warn};
 
 use crate::config::{Config, MonitorKind, SELF_MONITOR_ID, is_builtin_monitor};
+use crate::config_watch::{ConfigWatch, fingerprint};
 use crate::db::{self, Store};
 use crate::notifications::{self, Notifiers};
 use crate::status::CheckStatus;
@@ -161,10 +163,12 @@ pub fn spawn(
     mut config: watch::Receiver<Arc<Config>>,
     notifier: Notifiers,
     health: Arc<SelfHealth>,
+    config_watch: Arc<ConfigWatch>,
     mut shutdown: watch::Receiver<bool>,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
         let mut first_seen: HashMap<String, i64> = HashMap::new();
+        let mut drift = Drift::default();
         let mut recorded: Option<(CheckStatus, String, i64)> = None;
         loop {
             let snapshot = config.borrow_and_update().clone();
@@ -200,7 +204,7 @@ pub fn spawn(
                 .into_iter()
                 .map(|death| (death.what, death.id))
                 .collect();
-            let found = findings(
+            let mut found = findings(
                 &snapshot,
                 &last_checks,
                 &first_seen,
@@ -209,6 +213,9 @@ pub fn spawn(
                 health.coalescer_dead.load(Ordering::Acquire),
                 now,
             );
+            if let Some(finding) = drift.check(&config_watch, now) {
+                found.push(finding);
+            }
             let (status, message) = state(&found);
             let changed = recorded.as_ref().is_none_or(|(s, m, at)| {
                 *s != status || *m != message || now - at >= REFRESH.as_secs().cast_signed()
@@ -225,6 +232,48 @@ pub fn spawn(
             }
         }
     })
+}
+
+/// Notices a config edit that no file event announced: the file on disk differs
+/// from the text the supervisor applied, unchanged across two checks (a real
+/// event would have reloaded it within a second). Hora then reloads anyway, and
+/// reports the miss for [`PANIC_WINDOW_SECS`]: the watcher is not to be trusted.
+#[derive(Debug, Default)]
+struct Drift {
+    /// The differing text seen at the previous check.
+    pending: Option<u64>,
+    /// When a change was last missed.
+    missed_at: Option<i64>,
+}
+
+impl Drift {
+    fn check(&mut self, watch: &ConfigWatch, now: i64) -> Option<String> {
+        match std::fs::read_to_string(watch.path()) {
+            // The supervisor reports an unreadable file through the config monitor.
+            Err(_) => {
+                self.pending = None;
+                watch.request_reload();
+            }
+            Ok(raw) if watch.is_applied(&raw) => self.pending = None,
+            Ok(raw) => {
+                let seen = fingerprint(&raw);
+                if self.pending == Some(seen) {
+                    warn!("the config file changed without a file event; reloading it now");
+                    self.missed_at = Some(now);
+                    self.pending = None;
+                    watch.request_reload();
+                } else {
+                    self.pending = Some(seen);
+                }
+            }
+        }
+        let missed_at = self.missed_at.filter(|at| now - at <= PANIC_WINDOW_SECS)?;
+        Some(format!(
+            "the config file changed without a file event {} min ago (applied by the \
+             self-check); live reload is not reliable here",
+            (now - missed_at) / 60
+        ))
+    }
 }
 
 /// The self-check monitor's status and message for `found`.
@@ -377,5 +426,45 @@ mod tests {
         assert!(!health.cannot_deliver());
         health.coalescer_died();
         assert!(health.cannot_deliver());
+    }
+
+    #[test]
+    fn a_change_without_a_file_event_is_applied_and_reported() {
+        let dir = std::env::temp_dir().join(format!("hora-drift-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.toml");
+        std::fs::write(&path, "one").unwrap();
+        let (tx, mut rx) = tokio::sync::mpsc::channel(8);
+        let watch = ConfigWatch::for_test(path.clone(), tx);
+        watch.applied("one");
+        let mut drift = Drift::default();
+        assert_eq!(drift.check(&watch, 0), None, "in sync");
+
+        std::fs::write(&path, "two").unwrap();
+        assert_eq!(
+            drift.check(&watch, 60),
+            None,
+            "a file event may still be on its way"
+        );
+        assert!(rx.try_recv().is_err());
+        let finding = drift.check(&watch, 120).expect("missed on the second look");
+        assert!(
+            finding.contains("without a file event 0 min ago"),
+            "{finding}"
+        );
+        assert!(rx.try_recv().is_ok(), "the self-check asks for the reload");
+
+        // Applied now: the miss stays reported for an hour, then ages out.
+        watch.applied("two");
+        assert!(drift.check(&watch, 180).is_some());
+        assert_eq!(drift.check(&watch, 120 + PANIC_WINDOW_SECS + 1), None);
+
+        // A change a file event applied in time is never a finding.
+        let mut drift = Drift::default();
+        std::fs::write(&path, "three").unwrap();
+        assert_eq!(drift.check(&watch, 0), None);
+        watch.applied("three");
+        assert_eq!(drift.check(&watch, 60), None);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

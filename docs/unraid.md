@@ -20,10 +20,16 @@ In Unraid, use **Docker → Add Container**:
 | Repository | `ghcr.io/jakob-gliwa/hora:main` |
 | Network type | Bridge, or a custom network (e.g. `br0`) if monitored services are only reachable there |
 | Container port | `8787` TCP; choose an unused host port |
-| Config file mapping | Your private `config.toml` → `/etc/hora/config.toml`, read-only |
+| Config directory mapping | The directory holding your private `config.toml` (e.g. `/mnt/user/appdata/hora/config`) → `/etc/hora`, read-only |
 | Data directory mapping | Your appdata directory → `/data`, read/write |
 | WebUI | `http://[IP]:[PORT:8787]/` |
 | Variable | `TOKIO_WORKER_THREADS=2` (image default) |
+
+Map the **directory**, not the file. Edits to `config.toml` are applied live,
+but a file mapped on its own receives no change events, and once an editor
+replaces it on the host the container cannot read it any more until restart.
+Hora reports such a mapping through its configuration monitor (see
+[config-resilience](config-resilience.md#live-reload)).
 
 The process runs as UID/GID `10001:10001`. Create the data directory with that
 owner and ensure that UID can read the config file. Keep the database on local

@@ -26,6 +26,11 @@ pub(crate) fn import_kuma(args: &[String]) -> Result<(), CliError> {
 /// CI and pre-deploy hooks.
 pub(crate) fn check_config() -> Result<(), CliError> {
     let config_path = config::path();
+    // How this environment mounts the file says nothing about its validity, so
+    // a live-reload problem is a note, not a failure.
+    for issue in hora_core::config_watch::live_reload_issues(&config_path) {
+        println!("note: {issue}");
+    }
     match config::load_lenient_from(&config_path) {
         Ok(config) if config.issues.is_empty() && !config.cannot_alert => {
             println!("{} is valid.", config_path.display());

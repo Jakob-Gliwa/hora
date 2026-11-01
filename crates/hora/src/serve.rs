@@ -111,6 +111,7 @@ pub(crate) async fn serve() -> anyhow::Result<()> {
         handle.config.clone(),
         handle.notifier.clone(),
         Arc::clone(&handle.self_health),
+        Arc::clone(&handle.config_watch),
         shutdown_rx.clone(),
     );
 

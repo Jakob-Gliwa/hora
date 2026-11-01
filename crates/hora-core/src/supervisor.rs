@@ -15,21 +15,20 @@
 //! heartbeat reads `[health]` on every cycle.
 
 use std::collections::HashMap;
-use std::ffi::OsStr;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::atomic::AtomicU64;
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use crate::db::Store;
-use notify::{EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use reqwest::Client;
 use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
 use tracing::{error, info, warn};
 
 use crate::coalesce::{self, AlertMsg};
-use crate::config::{self, Config, Monitor, Peer};
+use crate::config::{self, Config, ConfigIssue, Monitor, Peer};
+use crate::config_watch::ConfigWatch;
 use crate::mesh::peer::spawn_watch;
 use crate::notifications::{self, Notifiers};
 use crate::scheduler::{self, AlertCell};
@@ -143,19 +142,28 @@ pub struct Handle {
     pub task: JoinHandle<()>,
     /// Task deaths and a dead coalescer, for the self-check and the heartbeat.
     pub self_health: Arc<crate::self_check::SelfHealth>,
+    /// The applied config text, for the self-check's missed-change detection.
+    pub config_watch: Arc<ConfigWatch>,
 }
 
 /// Start supervising: build the notifier set, spawn the initial monitors and the
 /// reload loop, and return the handles every component reads.
 #[must_use]
 pub fn start(
-    initial: Config,
+    mut initial: Config,
     config_path: PathBuf,
     store: Store,
     client: Client,
     last_tick: Arc<AtomicU64>,
     shutdown: watch::Receiver<bool>,
 ) -> Handle {
+    // Why edits might not arrive (single-file mount, network filesystem, no
+    // watcher) is a standing issue of every load, so the config monitor shows it.
+    let (reloads, config_watch, live_issues) = crate::config_watch::start(&config_path);
+    for issue in &live_issues {
+        error!("config: {issue}");
+    }
+    initial.issues.extend(live_issues.iter().cloned());
     let notifier = notifications::shared(&initial, &client);
     let (tx, rx) = watch::channel(Arc::new(initial));
     let (alerts_tx, alerts_rx) = mpsc::unbounded_channel();
@@ -178,8 +186,14 @@ pub fn start(
     };
     let self_health = Arc::clone(&deps.self_health);
     let supervisor_rx = rx.clone();
+    let reload = Reload {
+        config_path,
+        reloads,
+        config_watch: Arc::clone(&config_watch),
+        live_issues,
+    };
     let task = tokio::spawn(async move {
-        supervise(tx, supervisor_rx, config_path, deps, coalescer, shutdown).await;
+        supervise(tx, supervisor_rx, reload, deps, coalescer, shutdown).await;
         let _ = mqtt_task.await;
     });
     Handle {
@@ -187,17 +201,33 @@ pub fn start(
         notifier,
         task,
         self_health,
+        config_watch,
     }
+}
+
+/// Where reloads come from and what every load carries along.
+struct Reload {
+    config_path: PathBuf,
+    reloads: mpsc::Receiver<()>,
+    config_watch: Arc<ConfigWatch>,
+    /// Why edits might not arrive; re-added to every load's issues.
+    live_issues: Vec<ConfigIssue>,
 }
 
 async fn supervise(
     tx: watch::Sender<Arc<Config>>,
     rx: watch::Receiver<Arc<Config>>,
-    config_path: PathBuf,
+    reload: Reload,
     deps: Deps,
     coalescer: JoinHandle<()>,
     mut shutdown: watch::Receiver<bool>,
 ) {
+    let Reload {
+        config_path,
+        mut reloads,
+        config_watch,
+        live_issues,
+    } = reload;
     let mut monitors: Fleet<Monitor> = Fleet::default();
     let mut peers: Fleet<Peer> = Fleet::default();
     reconcile(&mut monitors, &rx, &deps, &shutdown);
@@ -207,8 +237,8 @@ async fn supervise(
     // or a spurious event from some filesystems) is ignored, so a flapping watcher
     // can never spin the supervisor.
     let mut last_raw = std::fs::read_to_string(&config_path).unwrap_or_default();
+    config_watch.applied(&last_raw);
 
-    let mut reloads = reload_signals(&config_path);
     let mut liveness = tokio::time::interval(LIVENESS_CHECK);
     liveness.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let mut coalescer_dead_logged = false;
@@ -238,16 +268,23 @@ async fn supervise(
         if signal.is_none() {
             break;
         }
-        // Debounce: let a burst settle, then drain everything that piled up, so one
-        // edit (which fires several events) becomes a single reload.
-        tokio::time::sleep(RELOAD_DEBOUNCE).await;
-        while reloads.try_recv().is_ok() {}
+        // Debounce: wait until the events stop for a moment, so one edit (which
+        // fires several events) becomes a single reload, and a file still being
+        // written in place is not read half-way.
+        settle(&mut reloads).await;
 
         let raw = match std::fs::read_to_string(&config_path) {
             Ok(raw) => raw,
             Err(err) => {
-                warn!("config reload skipped, cannot read file: {err:#}");
-                continue;
+                // Loudly, through the config monitor: monitors keep running, but
+                // edits cannot be applied until the file is readable again.
+                // Re-read once it is readable, even if the text is the same as before.
+                last_raw.clear();
+                let current = with_file_issue(&rx.borrow(), unreadable_reason(&err));
+                match current.map(|current| tx.send(Arc::new(current))) {
+                    Some(Err(_)) => break,
+                    _ => continue, // Published, or reported already.
+                }
             }
         };
         if raw == last_raw {
@@ -255,8 +292,10 @@ async fn supervise(
         }
 
         match config::parse_lenient(&raw) {
-            Ok(config) => {
+            Ok(mut config) => {
+                config_watch.applied(&raw);
                 last_raw = raw;
+                config.issues.extend(live_issues.iter().cloned());
                 log_issues(&config);
                 let config = Arc::new(config);
                 // Rebuild the channels too, so credential/channel changes
@@ -285,16 +324,14 @@ async fn supervise(
                 // the monitors keep running as loaded before, and the
                 // configuration monitor says so - loudly, not silently.
                 error!("config reload failed, monitors keep their previous configuration: {err:#}");
+                config_watch.applied(&raw);
                 last_raw = raw;
-                let mut current = Config::clone(&rx.borrow());
-                current.issues.retain(|issue| issue.item != "config file");
-                current.issues.push(config::ConfigIssue {
-                    item: "config file".to_owned(),
-                    reason: format!(
-                        "cannot be loaded ({err:#}); monitors still run the configuration loaded before"
-                    ),
-                });
-                if tx.send(Arc::new(current)).is_err() {
+                let reason = format!(
+                    "cannot be loaded ({err:#}); monitors still run the configuration loaded before"
+                );
+                if let Some(current) = with_file_issue(&rx.borrow(), reason)
+                    && tx.send(Arc::new(current)).is_err()
+                {
                     break;
                 }
             }
@@ -321,9 +358,53 @@ pub fn log_issues(config: &Config) {
     }
 }
 
-/// How long to wait after the first file event before reloading, so a burst of
-/// events (and any self-triggered ones) collapse into a single reload.
-const RELOAD_DEBOUNCE: Duration = Duration::from_millis(500);
+/// Reload once the file events have been quiet this long, so a burst of events
+/// collapses into a single reload and a write in progress is not read half-way.
+const RELOAD_QUIET: Duration = Duration::from_millis(500);
+/// ...but never wait longer than this for a file that keeps changing.
+const RELOAD_MAX_WAIT: Duration = Duration::from_secs(5);
+
+async fn settle(reloads: &mut mpsc::Receiver<()>) {
+    let deadline = tokio::time::Instant::now() + RELOAD_MAX_WAIT;
+    while let Ok(Some(())) = tokio::time::timeout_at(
+        deadline.min(tokio::time::Instant::now() + RELOAD_QUIET),
+        reloads.recv(),
+    )
+    .await
+    {}
+}
+
+/// The running config with `reason` as its config-file issue, or `None` when
+/// exactly that is reported already (an unreadable file is retried every minute).
+fn with_file_issue(current: &Config, reason: String) -> Option<Config> {
+    if current
+        .issues
+        .iter()
+        .any(|issue| issue.item == "config file" && issue.reason == reason)
+    {
+        return None;
+    }
+    error!("config file {reason}");
+    let mut current = current.clone();
+    current.issues.retain(|issue| issue.item != "config file");
+    current.issues.push(ConfigIssue {
+        item: "config file".to_owned(),
+        reason,
+    });
+    Some(current)
+}
+
+/// The config monitor's text for a file that cannot be read.
+fn unreadable_reason(err: &std::io::Error) -> String {
+    // ESTALE: a file bind-mounted on its own was replaced on the host.
+    let hint = if err.raw_os_error() == Some(116) {
+        " - the file was replaced on the host while mounted on its own; restart the container, \
+         and mount the directory instead of the file"
+    } else {
+        ""
+    };
+    format!("cannot be read ({err}){hint}; monitors still run the configuration loaded before")
+}
 
 /// Diff running tasks against the latest config: stop removed or changed
 /// monitors, start new or changed ones, leave unchanged ones untouched. A
@@ -455,82 +536,6 @@ fn reconcile_peers(
             );
         }
     }
-}
-
-/// A channel that fires whenever the config should be reloaded: on SIGHUP, and
-/// whenever the config file changes on disk.
-fn reload_signals(config_path: &Path) -> mpsc::Receiver<()> {
-    let (tx, rx) = mpsc::channel(8);
-
-    spawn_sighup(tx.clone());
-
-    match file_watcher(config_path, tx) {
-        Ok(watcher) => {
-            // The watcher stops once dropped, so keep it alive for the process.
-            tokio::spawn(async move {
-                let _watcher = watcher;
-                std::future::pending::<()>().await;
-            });
-        }
-        Err(err) => warn!("config file watching disabled: {err}"),
-    }
-
-    rx
-}
-
-#[cfg(unix)]
-fn spawn_sighup(tx: mpsc::Sender<()>) {
-    use tokio::signal::unix::{SignalKind, signal};
-
-    tokio::spawn(async move {
-        let mut hangup = match signal(SignalKind::hangup()) {
-            Ok(hangup) => hangup,
-            Err(err) => {
-                warn!("cannot listen for SIGHUP: {err}");
-                return;
-            }
-        };
-        while hangup.recv().await.is_some() {
-            if tx.send(()).await.is_err() {
-                break;
-            }
-        }
-    });
-}
-
-#[cfg(not(unix))]
-fn spawn_sighup(_tx: mpsc::Sender<()>) {}
-
-fn file_watcher(config_path: &Path, tx: mpsc::Sender<()>) -> notify::Result<RecommendedWatcher> {
-    // Resolve symlinks so we watch the real file's directory: a symlinked config
-    // would otherwise point the watcher at the link's directory and miss edits to
-    // the target. (Reads still go through the original path.)
-    let resolved = std::fs::canonicalize(config_path).unwrap_or_else(|_| config_path.to_path_buf());
-    let watched_name = resolved.file_name().map(OsStr::to_owned);
-    let directory = resolved
-        .parent()
-        .filter(|parent| !parent.as_os_str().is_empty())
-        .map_or_else(|| PathBuf::from("."), Path::to_path_buf);
-
-    let mut watcher = notify::recommended_watcher(move |event: notify::Result<notify::Event>| {
-        let Ok(event) = event else { return };
-        // Ignore access (read) events: reading the file - including our own reload
-        // read - must never trigger a reload, or the watcher feeds itself forever.
-        if matches!(event.kind, EventKind::Access(_)) {
-            return;
-        }
-        let touches_config = event
-            .paths
-            .iter()
-            .any(|path| path.file_name().map(OsStr::to_owned) == watched_name);
-        if touches_config {
-            // Non-blocking: a dropped redundant event is harmless (the next one
-            // triggers a reload), and this avoids any off-runtime blocking_send.
-            let _ = tx.try_send(());
-        }
-    })?;
-    watcher.watch(&directory, RecursiveMode::NonRecursive)?;
-    Ok(watcher)
 }
 
 #[cfg(test)]

@@ -132,12 +132,22 @@ jobs:
           printf '[page]\n[server]\n' > "$RUNNER_TEMP/hora-smoke/config.toml"
           chmod 755 "$RUNNER_TEMP/hora-smoke"
           chmod 644 "$RUNNER_TEMP/hora-smoke/config.toml"
+          # The directory, as documented: live reload works. The file on its own
+          # (second container) must be reported, since edits would never arrive.
           docker run -d --name hora-smoke --network none \
+            -v "$RUNNER_TEMP/hora-smoke:/etc/hora:ro" hora:smoke
+          docker run -d --name hora-smoke-file --network none \
             -v "$RUNNER_TEMP/hora-smoke/config.toml:/etc/hora/config.toml:ro" hora:smoke
-          trap 'docker rm -fv hora-smoke >/dev/null 2>&1 || true' EXIT
+          trap 'docker rm -fv hora-smoke hora-smoke-file >/dev/null 2>&1 || true' EXIT
           for attempt in $(seq 1 30); do
             if docker exec hora-smoke wget -qO /dev/null http://127.0.0.1:8787/healthz; then
               docker image ls hora:smoke --format 'image size: {{.Size}}'
+              if docker logs hora-smoke 2>&1 | grep 'config: live reload'; then
+                echo "live reload reported as broken on a directory mount"; exit 1
+              fi
+              if ! docker logs hora-smoke-file 2>&1 | grep -q 'config: live reload: the file is mounted on its own'; then
+                docker logs hora-smoke-file; echo "single-file mount not reported"; exit 1
+              fi
               exit 0
             fi
             sleep 1
