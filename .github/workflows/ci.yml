@@ -73,18 +73,14 @@ jobs:
           persist-credentials: false
       - uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
 
-  # Build and publish the personal fork after checks, on main and release tags.
-  # Unraid follows the moving `main` tag, so the image is smoke-tested locally
-  # before anything is pushed. RustSec scanning lives in audit.yml; `deny`
-  # checks the same database on every run.
+  # Compile and smoke-test alongside check/deny. No registry write permission.
+  # Only the publish job below may update an Unraid image, after all gates pass.
   docker:
-    needs: [check, deny]
     if: github.repository == 'Jakob-Gliwa/hora' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
     runs-on: ubuntu-24.04
     timeout-minutes: 30
-    permissions:
-      contents: read
-      packages: write
+    outputs:
+      artifact-id: ${{ steps.binary.outputs.artifact-id }}
     env:
       RUST_IMAGE: rust:1.99.1-alpine
     steps:
@@ -126,34 +122,51 @@ jobs:
           platforms: linux/amd64
           load: true
           tags: hora:smoke
+      - name: Smoke test built binary
+        run: bash scripts/smoke-container.sh hora:smoke
+      - name: Share tested binary with publish job
+        id: binary
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: hora-linux-amd64-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/hora-image/hora
+          if-no-files-found: error
+          compression-level: 1
+          retention-days: 1
+
+  publish:
+    needs: [check, deny, docker]
+    if: github.repository == 'Jakob-Gliwa/hora' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          artifact-ids: ${{ needs.docker.outputs.artifact-id }}
+          path: ${{ runner.temp }}/hora-image
+          merge-multiple: true
+      # Artifact archives do not retain executable permissions.
+      - run: chmod 755 "$RUNNER_TEMP/hora-image/hora"
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - name: Build image for publication
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: ${{ runner.temp }}/hora-image
+          file: Dockerfile
+          build-args: BUILD_MODE=prebuilt
+          platforms: linux/amd64
+          load: true
+          tags: hora:smoke
+      # This runner assembles the runtime again: test that image too, so a
+      # changed base layer cannot reach main merely because the binary passed.
       - name: Smoke test before publishing
-        run: |
-          mkdir -p "$RUNNER_TEMP/hora-smoke"
-          printf '[page]\n[server]\n' > "$RUNNER_TEMP/hora-smoke/config.toml"
-          chmod 755 "$RUNNER_TEMP/hora-smoke"
-          chmod 644 "$RUNNER_TEMP/hora-smoke/config.toml"
-          # The directory, as documented: live reload works. The file on its own
-          # (second container) must be reported, since edits would never arrive.
-          docker run -d --name hora-smoke --network none \
-            -v "$RUNNER_TEMP/hora-smoke:/etc/hora:ro" hora:smoke
-          docker run -d --name hora-smoke-file --network none \
-            -v "$RUNNER_TEMP/hora-smoke/config.toml:/etc/hora/config.toml:ro" hora:smoke
-          trap 'docker rm -fv hora-smoke hora-smoke-file >/dev/null 2>&1 || true' EXIT
-          for attempt in $(seq 1 30); do
-            if docker exec hora-smoke wget -qO /dev/null http://127.0.0.1:8787/healthz; then
-              docker image ls hora:smoke --format 'image size: {{.Size}}'
-              if docker logs hora-smoke 2>&1 | grep 'config: live reload'; then
-                echo "live reload reported as broken on a directory mount"; exit 1
-              fi
-              if ! docker logs hora-smoke-file 2>&1 | grep -q 'config: live reload: the file is mounted on its own'; then
-                docker logs hora-smoke-file; echo "single-file mount not reported"; exit 1
-              fi
-              exit 0
-            fi
-            sleep 1
-          done
-          docker logs hora-smoke
-          exit 1
+        run: bash scripts/smoke-container.sh hora:smoke
       - name: Log in to GHCR
         uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
         with:

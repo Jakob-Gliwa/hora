@@ -8,6 +8,10 @@ caches the Cargo registry and build directory, and copies only that binary into
 an Alpine runtime image (about 20 MB), so the context cannot contain private
 configuration. The image is smoke-tested before it is pushed, so a broken build
 never reaches the `main` tag. Local `docker build .` still compiles from source.
+Compilation and its first smoke test run in parallel with the checks. A separate
+publish job waits for all three jobs to pass and takes only the tested binary
+from a one-day workflow artifact. It smoke-tests its assembled runtime again
+before publishing; only that job has registry write permission.
 A weekly workflow opens an issue when a newer upstream release is not merged yet.
 For a fixed version, use `ghcr.io/jakob-gliwa/hora:sha-<full-commit-sha>`.
 The image contains only the application, never installation configuration.
