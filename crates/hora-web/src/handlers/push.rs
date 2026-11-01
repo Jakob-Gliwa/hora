@@ -56,6 +56,11 @@ pub(crate) async fn push(
     method: Method,
 ) -> Result<Response, AppError> {
     let config = state.config.borrow().clone();
+    // The configuration monitor is fed by the daemon alone: no outside push
+    // may turn it green (same answer as an unknown id).
+    if id == hora_core::config::CONFIG_MONITOR_ID {
+        return Err(AppError::Unauthorized("invalid push token"));
+    }
     // Kuma embeds the credential in the path; map it to the internal ID.
     let compatible = config.monitors.iter().find(|monitor| {
         matches!(&monitor.spec, MonitorKind::Push(push) if push.kuma_compatible)

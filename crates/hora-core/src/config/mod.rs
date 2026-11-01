@@ -6,6 +6,10 @@
 
 mod channel;
 mod env;
+mod lenient;
+pub use lenient::{
+    CONFIG_MONITOR_ID, ConfigIssue, ConfigMonitor, parse_lenient, parse_lenient_with_exec_dir,
+};
 mod maintenance;
 mod monitor;
 pub use maintenance::Maintenance;
@@ -79,6 +83,18 @@ pub struct Config {
     /// run code; enabling exec probes takes deployment-level access too.
     #[serde(skip)]
     pub exec_dir: Option<std::path::PathBuf>,
+    /// The built-in configuration monitor (see [`CONFIG_MONITOR_ID`]).
+    #[serde(default)]
+    pub config_monitor: Option<ConfigMonitor>,
+    /// What a lenient load dropped or changed ([`parse_lenient`]); empty
+    /// after a strict one.
+    #[serde(skip)]
+    pub issues: Vec<ConfigIssue>,
+    /// A lenient load kept no notification channel or no monitor of the ones
+    /// configured: Hora cannot alert anybody itself, so it withholds its
+    /// external heartbeat and lets the dead-man service raise the alarm.
+    #[serde(skip)]
+    pub cannot_alert: bool,
 }
 
 impl Config {
@@ -547,7 +563,39 @@ pub fn load() -> anyhow::Result<Config> {
 pub fn load_from(path: &Path) -> anyhow::Result<Config> {
     let raw = std::fs::read_to_string(path)
         .with_context(|| format!("reading config {}", path.display()))?;
-    let mut config = parse(&raw)?;
+    let config = parse(&raw)?;
+    with_logos(config, path)
+}
+
+/// [`load_from`] through [`parse_lenient`]: faulty entries are dropped and
+/// listed in [`Config::issues`]; a logo that cannot be read is one more issue.
+///
+/// # Errors
+///
+/// Only for what cannot be loaded in part (unreadable file, TOML syntax,
+/// invalid global settings).
+pub fn load_lenient_from(path: &Path) -> anyhow::Result<Config> {
+    let raw = std::fs::read_to_string(path)
+        .with_context(|| format!("reading config {}", path.display()))?;
+    let config = parse_lenient(&raw)?;
+    let fallback = config.clone();
+    match with_logos(config, path) {
+        Ok(config) => Ok(config),
+        Err(err) => {
+            let mut config = fallback;
+            config.page.logo = None;
+            config.page.logo_dark = None;
+            config.issues.push(ConfigIssue {
+                item: "page.logo".to_owned(),
+                reason: format!("{err:#}; no logo shown"),
+            });
+            Ok(config)
+        }
+    }
+}
+
+/// Read the `[page]` logos `config` names, relative to `path`.
+fn with_logos(mut config: Config, path: &Path) -> anyhow::Result<Config> {
     let dir = path.parent().unwrap_or(Path::new(""));
     let page = &mut config.page;
     anyhow::ensure!(

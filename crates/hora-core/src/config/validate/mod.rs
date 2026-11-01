@@ -26,10 +26,10 @@ fn validate_token(label: &str, token: Option<&Secret>) -> anyhow::Result<()> {
 /// `expect_every_secs`): 30 days. Nothing sensible is slower, and a typo'd
 /// huge value would overflow `Instant` arithmetic in the tick timers - a panic
 /// that silently stops the task instead of a load error.
-const MAX_PERIOD_SECS: u64 = 30 * 24 * 3600;
+pub(super) const MAX_PERIOD_SECS: u64 = 30 * 24 * 3600;
 
 /// A period in seconds must be positive and at most [`MAX_PERIOD_SECS`].
-fn validate_period(label: &str, secs: u64) -> anyhow::Result<()> {
+pub(super) fn validate_period(label: &str, secs: u64) -> anyhow::Result<()> {
     anyhow::ensure!(secs > 0, "{label} must be > 0");
     anyhow::ensure!(
         secs <= MAX_PERIOD_SECS,
@@ -40,7 +40,7 @@ fn validate_period(label: &str, secs: u64) -> anyhow::Result<()> {
 
 /// Ids that appear in URLs (`/api/badge/{id}`, `/api/push/{id}`) must stay
 /// URL-safe.
-fn is_url_safe_id(id: &str) -> bool {
+pub(super) fn is_url_safe_id(id: &str) -> bool {
     id.chars()
         .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
 }
@@ -150,7 +150,10 @@ pub(super) fn validate(config: &Config) -> anyhow::Result<()> {
         // not secrets (a public monitor's id is served on the page and API):
         // anyone could forge heartbeats to mask an outage. Warn, don't fail -
         // a bare id may be acceptable on a private network.
-        if monitor.kind() == Kind::Push && monitor.push_token.is_none() {
+        if monitor.kind() == Kind::Push
+            && monitor.push_token.is_none()
+            && monitor.id != super::CONFIG_MONITOR_ID
+        {
             tracing::warn!(
                 "monitor {}: push monitor has no push_token - its id appears on the \
                  status page/API, so anyone who can reach /api/push can forge heartbeats",

@@ -26,12 +26,31 @@ pub(crate) fn import_kuma(args: &[String]) -> Result<(), CliError> {
 /// CI and pre-deploy hooks.
 pub(crate) fn check_config() -> Result<(), CliError> {
     let config_path = config::path();
-    match config::load_from(&config_path) {
-        Ok(_) => {
+    match config::load_lenient_from(&config_path) {
+        Ok(config) if config.issues.is_empty() && !config.cannot_alert => {
             println!("{} is valid.", config_path.display());
             Ok(())
         }
-        Err(err) => Err(CliError::Failed(format!("Configuration error: {err:#}"))),
+        Ok(config) => {
+            // Every issue, not just the first: the daemon would start without
+            // these entries (and its configuration monitor would be down).
+            for issue in &config.issues {
+                println!("{issue}");
+            }
+            if config.cannot_alert {
+                println!(
+                    "no notification channel or no monitor could be loaded: Hora could not alert"
+                );
+            }
+            Err(CliError::Failed(format!(
+                "{} issue(s) in {}: Hora would start without the entries above",
+                config.issues.len(),
+                config_path.display()
+            )))
+        }
+        Err(err) => Err(CliError::Failed(format!(
+            "Configuration error (Hora cannot start with this file): {err:#}"
+        ))),
     }
 }
 

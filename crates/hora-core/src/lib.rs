@@ -5,6 +5,7 @@ pub mod assertion;
 pub mod cert;
 pub mod coalesce;
 pub mod config;
+pub mod config_status;
 mod connect;
 pub mod db;
 pub mod digest;

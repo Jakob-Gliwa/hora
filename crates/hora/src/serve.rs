@@ -12,9 +12,12 @@ use tracing_subscriber::EnvFilter;
 
 /// Run the monitor: load config, open the database, start the supervisor and
 /// background tasks, and serve the status page until a shutdown signal.
+#[allow(clippy::too_many_lines)] // One linear start-up sequence; splitting it only scatters it.
 pub(crate) async fn serve() -> anyhow::Result<()> {
     let config_path = config::path();
-    let initial = config::load_from(&config_path).context("loading configuration")?;
+    let Some(initial) = load_initial(&config_path).await else {
+        return Ok(()); // shut down while waiting for a loadable file
+    };
     // Held until the process ends: `hora compact` rewrites the file and must
     // never do so under a running daemon (nor two daemons share one file).
     let _lock = hora_core::db::lock_exclusive(&initial.server.database_path)
@@ -98,6 +101,10 @@ pub(crate) async fn serve() -> anyhow::Result<()> {
         shutdown_rx.clone(),
     );
 
+    // The built-in configuration monitor: down while the load dropped entries.
+    let config_task =
+        hora_core::config_status::spawn(store.clone(), handle.config.clone(), shutdown_rx.clone());
+
     let prune_task =
         hora_core::maintenance::spawn_pruner(&store, handle.config.clone(), shutdown_rx);
 
@@ -141,7 +148,8 @@ pub(crate) async fn serve() -> anyhow::Result<()> {
             heartbeat_task,
             digest_task,
             vantage_task,
-            updates_task
+            updates_task,
+            config_task
         );
     })
     .await;
@@ -159,6 +167,113 @@ pub(crate) fn init_tracing() {
         Err(_) => EnvFilter::new("info"),
     };
     tracing_subscriber::fmt().with_env_filter(filter).init();
+}
+
+/// How often a configuration that cannot be loaded at all is read again.
+const CONFIG_RETRY: Duration = Duration::from_secs(5);
+
+/// Load the configuration for the daemon through the lenient loader: faulty
+/// entries are dropped and logged, the rest starts. A file that cannot be
+/// loaded at all (unreadable, TOML syntax, invalid global settings) does not
+/// end the process - a container would only restart it in a loop: Hora
+/// answers every request with 503 and the reason, and reads the file again
+/// every [`CONFIG_RETRY`] until it loads. `None` = shut down while waiting.
+async fn load_initial(path: &std::path::Path) -> Option<config::Config> {
+    let shutdown = shutdown_signal();
+    tokio::pin!(shutdown);
+    let reason = Arc::new(std::sync::Mutex::new(String::new()));
+    let mut error_page = None;
+    loop {
+        match config::load_lenient_from(path) {
+            Ok(config) => {
+                stop_error_page(error_page.take()).await;
+                hora_core::supervisor::log_issues(&config);
+                return Some(config);
+            }
+            Err(err) => {
+                let message = format!("{err:#}");
+                let changed = {
+                    let mut current = reason
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    let changed = *current != message;
+                    if changed {
+                        current.clone_from(&message);
+                    }
+                    changed
+                };
+                if changed {
+                    tracing::error!(
+                        "configuration cannot be loaded, retrying every {}s until it is fixed: {message}",
+                        CONFIG_RETRY.as_secs()
+                    );
+                }
+                if error_page.is_none() {
+                    error_page = serve_config_error(Arc::clone(&reason)).await;
+                }
+            }
+        }
+        tokio::select! {
+            () = tokio::time::sleep(CONFIG_RETRY) => {}
+            () = &mut shutdown => {
+                stop_error_page(error_page.take()).await;
+                return None;
+            }
+        }
+    }
+}
+
+type ErrorPage = (
+    tokio::task::JoinHandle<()>,
+    tokio::sync::oneshot::Sender<()>,
+);
+
+/// While waiting for a loadable configuration: 503 and the reason on every
+/// path (so `/healthz` and the container health check fail visibly), bound
+/// where the daemon will listen (`HORA_BIND`, else its default).
+async fn serve_config_error(reason: Arc<std::sync::Mutex<String>>) -> Option<ErrorPage> {
+    let bind = std::env::var("HORA_BIND").unwrap_or_else(|_| "127.0.0.1:8787".to_owned());
+    let listener = match tokio::net::TcpListener::bind(&bind).await {
+        Ok(listener) => listener,
+        Err(err) => {
+            tracing::warn!("cannot serve the configuration error page on {bind}: {err}");
+            return None;
+        }
+    };
+    let app = axum::Router::new().fallback(move || {
+        let reason = Arc::clone(&reason);
+        async move {
+            let reason = reason
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone();
+            (
+                axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                format!(
+                    "Hora cannot load its configuration:\n\n{reason}\n\nIt reads the file again \
+                     every {}s and starts as soon as it loads.\n",
+                    CONFIG_RETRY.as_secs()
+                ),
+            )
+        }
+    });
+    let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
+    let task = tokio::spawn(async move {
+        let _ = axum::serve(listener, app)
+            .with_graceful_shutdown(async {
+                let _ = stopped.await;
+            })
+            .await;
+    });
+    Some((task, stop))
+}
+
+/// Stop the error page and release its port before the real server binds.
+async fn stop_error_page(page: Option<ErrorPage>) {
+    if let Some((task, stop)) = page {
+        let _ = stop.send(());
+        let _ = task.await;
+    }
 }
 
 /// Resolve when the process receives a shutdown signal. Listens for Ctrl-C on

@@ -246,9 +246,10 @@ async fn supervise(
             continue; // Content unchanged: nothing to do.
         }
 
-        match config::parse(&raw) {
+        match config::parse_lenient(&raw) {
             Ok(config) => {
                 last_raw = raw;
+                log_issues(&config);
                 let config = Arc::new(config);
                 // Rebuild the channels too, so credential/channel changes
                 // apply live. The per-channel failure counters are carried over
@@ -271,7 +272,24 @@ async fn supervise(
                     deps.notifier.load().len(),
                 );
             }
-            Err(err) => warn!("config reload failed, keeping current config: {err:#}"),
+            Err(err) => {
+                // Nothing of the file can be loaded (syntax, global settings):
+                // the monitors keep running as loaded before, and the
+                // configuration monitor says so - loudly, not silently.
+                error!("config reload failed, monitors keep their previous configuration: {err:#}");
+                last_raw = raw;
+                let mut current = Config::clone(&rx.borrow());
+                current.issues.retain(|issue| issue.item != "config file");
+                current.issues.push(config::ConfigIssue {
+                    item: "config file".to_owned(),
+                    reason: format!(
+                        "cannot be loaded ({err:#}); monitors still run the configuration loaded before"
+                    ),
+                });
+                if tx.send(Arc::new(current)).is_err() {
+                    break;
+                }
+            }
         }
     }
 
@@ -280,6 +298,19 @@ async fn supervise(
     monitors.drain().await;
     peers.drain().await;
     let _ = coalescer.await;
+}
+
+/// One ERROR line per entry a lenient load dropped or changed.
+pub fn log_issues(config: &Config) {
+    for issue in &config.issues {
+        error!("config: {issue}");
+    }
+    if config.cannot_alert {
+        error!(
+            "config: no notification channel or no monitor could be loaded - Hora cannot \
+             alert by itself and withholds its external heartbeat"
+        );
+    }
 }
 
 /// How long to wait after the first file event before reloading, so a burst of

@@ -35,52 +35,69 @@ fn default_keep_alive() -> u64 {
     15
 }
 
+/// The endpoint a broker connects to with its user: two brokers sharing it
+/// would only open a second connection for the same subscriptions.
+pub(crate) type BrokerIdentity = (String, String, u16, Option<String>);
+
+/// One broker's own settings: URL shape, credentials and bounds. Returns its
+/// endpoint identity for the duplicate check.
+pub(crate) fn check_broker(broker: &Broker) -> anyhow::Result<BrokerIdentity> {
+    anyhow::ensure!(
+        !broker.name.is_empty(),
+        "broker names must be nonempty and unique"
+    );
+    let url = reqwest::Url::parse(broker.url.as_ref())
+        .map_err(|_| anyhow::anyhow!("invalid MQTT broker URL"))?;
+    anyhow::ensure!(
+        matches!(url.scheme(), "mqtt" | "mqtts")
+            && url.host_str().is_some()
+            && url.username().is_empty()
+            && url.password().is_none()
+            && url.query().is_none()
+            && url.fragment().is_none()
+            && matches!(url.path(), "" | "/"),
+        "broker URL must be mqtt(s)://host:port; use username/password fields"
+    );
+    anyhow::ensure!(
+        ClientBuilder::new(broker.url.as_ref()).is_ok(),
+        "invalid MQTT broker URL"
+    );
+    anyhow::ensure!(
+        broker.password.is_none() || broker.username.is_some(),
+        "MQTT password requires username"
+    );
+    anyhow::ensure!(
+        (1..=1024).contains(&broker.max_packet_kb),
+        "MQTT max_packet_kb must be 1..1024"
+    );
+    anyhow::ensure!(
+        (5..=300).contains(&broker.keep_alive_secs),
+        "MQTT keep_alive_secs must be 5..300"
+    );
+    Ok((
+        url.scheme().to_owned(),
+        url.host_str().unwrap_or_default().to_owned(),
+        url.port()
+            .unwrap_or(if url.scheme() == "mqtts" { 8883 } else { 1883 }),
+        broker
+            .username
+            .as_ref()
+            .map(|user| user.as_ref().to_owned()),
+    ))
+}
+
 pub(crate) fn validate(config: &Config) -> anyhow::Result<()> {
     let mut names = HashSet::new();
     let mut endpoints = HashSet::new();
     for broker in &config.brokers {
+        let identity = check_broker(broker)?;
         anyhow::ensure!(
-            !broker.name.is_empty() && names.insert(&broker.name),
+            names.insert(&broker.name),
             "broker names must be nonempty and unique"
-        );
-        let url = reqwest::Url::parse(broker.url.as_ref())
-            .map_err(|_| anyhow::anyhow!("invalid MQTT broker URL"))?;
-        anyhow::ensure!(
-            matches!(url.scheme(), "mqtt" | "mqtts")
-                && url.host_str().is_some()
-                && url.username().is_empty()
-                && url.password().is_none()
-                && url.query().is_none()
-                && url.fragment().is_none()
-                && matches!(url.path(), "" | "/"),
-            "broker URL must be mqtt(s)://host:port; use username/password fields"
-        );
-        anyhow::ensure!(
-            ClientBuilder::new(broker.url.as_ref()).is_ok(),
-            "invalid MQTT broker URL"
-        );
-        let identity = (
-            url.scheme().to_owned(),
-            url.host_str().unwrap_or_default().to_owned(),
-            url.port()
-                .unwrap_or(if url.scheme() == "mqtts" { 8883 } else { 1883 }),
-            broker.username.as_ref().map(AsRef::as_ref),
         );
         anyhow::ensure!(
             endpoints.insert(identity),
             "duplicate MQTT endpoint/user; share one named broker"
-        );
-        anyhow::ensure!(
-            broker.password.is_none() || broker.username.is_some(),
-            "MQTT password requires username"
-        );
-        anyhow::ensure!(
-            (1..=1024).contains(&broker.max_packet_kb),
-            "MQTT max_packet_kb must be 1..1024"
-        );
-        anyhow::ensure!(
-            (5..=300).contains(&broker.keep_alive_secs),
-            "MQTT keep_alive_secs must be 5..300"
         );
     }
     for monitor in &config.monitors {

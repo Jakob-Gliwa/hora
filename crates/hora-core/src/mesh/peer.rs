@@ -183,6 +183,12 @@ pub fn spawn_heartbeat(
                 warn!(scheduler_ok, db_ok, "heartbeat skipped: node unhealthy");
                 continue;
             }
+            // No channel or no monitor survived the config load: Hora cannot
+            // alert by itself, so the dead-man service has to.
+            if snapshot.cannot_alert {
+                warn!("heartbeat withheld: no notification channel or monitor could be loaded");
+                continue;
+            }
 
             let digest = format!("ok mon={} tick={}s", snapshot.monitors.len(), age.max(0));
             let targets = snapshot
