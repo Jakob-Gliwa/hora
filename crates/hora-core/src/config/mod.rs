@@ -8,7 +8,8 @@ mod channel;
 mod env;
 mod lenient;
 pub use lenient::{
-    CONFIG_MONITOR_ID, ConfigIssue, ConfigMonitor, parse_lenient, parse_lenient_with_exec_dir,
+    CONFIG_MONITOR_ID, ConfigIssue, ConfigMonitor, SELF_MONITOR_ID, is_builtin_monitor,
+    parse_lenient, parse_lenient_with_exec_dir,
 };
 mod maintenance;
 mod monitor;
@@ -86,6 +87,9 @@ pub struct Config {
     /// The built-in configuration monitor (see [`CONFIG_MONITOR_ID`]).
     #[serde(default)]
     pub config_monitor: Option<ConfigMonitor>,
+    /// The built-in self-check monitor (see [`SELF_MONITOR_ID`]).
+    #[serde(default)]
+    pub self_monitor: Option<ConfigMonitor>,
     /// What a lenient load dropped or changed ([`parse_lenient`]); empty
     /// after a strict one.
     #[serde(skip)]

@@ -471,7 +471,7 @@ async fn kuma_push_get_post_tokens_fractional_ping_and_body() {
 }
 
 #[tokio::test]
-async fn the_config_monitor_cannot_be_pushed_from_outside() {
+async fn the_builtin_monitors_cannot_be_pushed_from_outside() {
     // Loaded leniently, as the daemon does, so the built-in monitor exists.
     let config = Arc::new(hora_core::config::parse_lenient("[page]\n[server]\n").unwrap());
     assert!(
@@ -489,7 +489,11 @@ async fn the_config_monitor_cannot_be_pushed_from_outside() {
         Arc::new(AtomicU64::new(fresh_tick())),
         notifier,
     ));
-    for method_uri in ["/api/push/hora-config?status=up", "/api/push/hora-config"] {
+    for method_uri in [
+        "/api/push/hora-config?status=up",
+        "/api/push/hora-config",
+        "/api/push/hora-self?status=up",
+    ] {
         let res = app.clone().oneshot(push(method_uri)).await.unwrap();
         assert_eq!(res.status(), StatusCode::UNAUTHORIZED, "{method_uri}");
     }

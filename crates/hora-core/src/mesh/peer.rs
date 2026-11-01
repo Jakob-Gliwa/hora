@@ -156,6 +156,7 @@ pub fn spawn_heartbeat(
     store: Store,
     client: Client,
     last_tick: Arc<AtomicU64>,
+    self_health: Arc<crate::self_check::SelfHealth>,
     mut shutdown: watch::Receiver<bool>,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
@@ -187,6 +188,12 @@ pub fn spawn_heartbeat(
             // alert by itself, so the dead-man service has to.
             if snapshot.cannot_alert {
                 warn!("heartbeat withheld: no notification channel or monitor could be loaded");
+                continue;
+            }
+            // Every channel failing, or the coalescer gone: Hora's own alerts
+            // reach nobody, so the dead-man service has to.
+            if self_health.cannot_deliver() {
+                warn!("heartbeat withheld: alerts cannot be delivered");
                 continue;
             }
 
@@ -533,6 +540,7 @@ mod tests {
             Store::in_memory().await,
             Client::builder().no_proxy().build().unwrap(),
             Arc::new(AtomicU64::new(0)),
+            Arc::default(),
             stopping,
         );
         let requests = tokio::time::timeout(Duration::from_secs(5), async {

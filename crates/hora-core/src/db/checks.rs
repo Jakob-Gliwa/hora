@@ -261,6 +261,21 @@ pub async fn check_samples(
     .await
 }
 
+/// The latest check time of every monitor that has one (the self-check's input).
+///
+/// # Errors
+///
+/// A database error.
+pub async fn last_check_times(
+    store: &Store,
+) -> sqlx::Result<std::collections::HashMap<String, i64>> {
+    let rows: Vec<(String, i64)> =
+        sqlx::query_as("SELECT monitor_id, MAX(time) FROM checks GROUP BY monitor_id")
+            .fetch_all(store.sqlx())
+            .await?;
+    Ok(rows.into_iter().collect())
+}
+
 /// The timestamp of a monitor's most recent check, if any (push staleness).
 ///
 /// # Errors

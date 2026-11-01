@@ -68,6 +68,7 @@ pub(crate) async fn serve() -> anyhow::Result<()> {
         store.clone(),
         client.clone(),
         Arc::clone(&last_tick),
+        Arc::clone(&handle.self_health),
         shutdown_rx.clone(),
     );
 
@@ -104,6 +105,14 @@ pub(crate) async fn serve() -> anyhow::Result<()> {
     // The built-in configuration monitor: down while the load dropped entries.
     let config_task =
         hora_core::config_status::spawn(store.clone(), handle.config.clone(), shutdown_rx.clone());
+    // Hora watching itself: stale monitors, crashed tasks, failing channels.
+    let self_task = hora_core::self_check::spawn(
+        store.clone(),
+        handle.config.clone(),
+        handle.notifier.clone(),
+        Arc::clone(&handle.self_health),
+        shutdown_rx.clone(),
+    );
 
     let prune_task =
         hora_core::maintenance::spawn_pruner(&store, handle.config.clone(), shutdown_rx);
@@ -149,7 +158,8 @@ pub(crate) async fn serve() -> anyhow::Result<()> {
             digest_task,
             vantage_task,
             updates_task,
-            config_task
+            config_task,
+            self_task
         );
     })
     .await;

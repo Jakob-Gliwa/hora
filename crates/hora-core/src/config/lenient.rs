@@ -25,6 +25,14 @@ use super::{
 
 /// Id of the built-in monitor that is down while the configuration has issues.
 pub const CONFIG_MONITOR_ID: &str = "hora-config";
+/// Id of the built-in self-check monitor (see `crate::self_check`).
+pub const SELF_MONITOR_ID: &str = "hora-self";
+
+/// Whether `id` is one of Hora's built-in monitors (fed by Hora, never by `/api/push`).
+#[must_use]
+pub fn is_builtin_monitor(id: &str) -> bool {
+    id == CONFIG_MONITOR_ID || id == SELF_MONITOR_ID
+}
 
 /// One entry the daemon dropped or changed while loading, and why.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -41,7 +49,7 @@ impl std::fmt::Display for ConfigIssue {
     }
 }
 
-/// `[config_monitor]`: how the built-in configuration monitor shows and alerts.
+/// `[config_monitor]` / `[self_monitor]`: how a built-in monitor shows and alerts.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ConfigMonitor {
@@ -104,7 +112,8 @@ pub fn parse_lenient_with_exec_dir(
     prune(&mut config, &mut issues);
     config.cannot_alert = (configured_channels > 0 && config.channels.is_empty())
         || (configured_monitors > 0 && config.monitors.is_empty());
-    add_config_monitor(&mut config, &mut issues)?;
+    add_builtin(&mut config, &mut issues, CONFIG_MONITOR_ID)?;
+    add_builtin(&mut config, &mut issues, SELF_MONITOR_ID)?;
 
     // Whatever the passes above do not foresee: drop the monitor an error
     // names and try again; anything else is a global error.
@@ -112,7 +121,7 @@ pub fn parse_lenient_with_exec_dir(
     while let Err(err) = super::validate::validate(&config) {
         let message = format!("{err:#}");
         let named = config.monitors.iter().position(|monitor| {
-            monitor.id != CONFIG_MONITOR_ID && names_monitor(&message, &monitor.id)
+            !is_builtin_monitor(&monitor.id) && names_monitor(&message, &monitor.id)
         });
         match named {
             Some(index) if rounds > 0 => {
@@ -389,6 +398,9 @@ fn prune(config: &mut Config, issues: &mut Vec<ConfigIssue>) {
     if let Some(section) = &mut config.config_monitor {
         drop_routes("config_monitor", &mut section.notify, &channels, issues);
     }
+    if let Some(section) = &mut config.self_monitor {
+        drop_routes("self_monitor", &mut section.notify, &channels, issues);
+    }
 }
 
 /// Why a single monitor cannot run, judged against the ones kept before it.
@@ -403,9 +415,10 @@ fn monitor_problem(
     auth: bool,
     exec_ok: bool,
 ) -> Option<String> {
-    if monitor.id == CONFIG_MONITOR_ID {
+    if is_builtin_monitor(&monitor.id) {
         return Some(format!(
-            "id {CONFIG_MONITOR_ID:?} is reserved for the built-in configuration monitor"
+            "id {:?} is reserved for a built-in monitor",
+            monitor.id
         ));
     }
     if monitor.id.is_empty() || !super::validate::is_url_safe_id(&monitor.id) {
@@ -485,18 +498,28 @@ fn drop_routes(
         });
     }
 }
-
-/// Append the built-in configuration monitor: a push monitor fed by the
-/// daemon itself (never by `/api/push`), down while there are issues.
-fn add_config_monitor(config: &mut Config, issues: &mut Vec<ConfigIssue>) -> anyhow::Result<()> {
-    let section = config.config_monitor.clone().unwrap_or_default();
+/// Append a built-in monitor: a push monitor fed by the daemon itself (never
+/// by `/api/push`), down while it has something to report.
+fn add_builtin(config: &mut Config, issues: &mut Vec<ConfigIssue>, id: &str) -> anyhow::Result<()> {
+    let config_monitor = id == CONFIG_MONITOR_ID;
+    let (key, default_name) = if config_monitor {
+        ("config_monitor", "Hora configuration")
+    } else {
+        ("self_monitor", "Hora self-check")
+    };
+    let section = if config_monitor {
+        config.config_monitor.clone()
+    } else {
+        config.self_monitor.clone()
+    }
+    .unwrap_or_default();
     let mut table = toml::Table::new();
-    table.insert("id".into(), CONFIG_MONITOR_ID.into());
+    table.insert("id".into(), id.into());
     table.insert(
         "name".into(),
         section
             .name
-            .unwrap_or_else(|| "Hora configuration".to_owned())
+            .unwrap_or_else(|| default_name.to_owned())
             .into(),
     );
     table.insert("kind".into(), "push".into());
@@ -529,11 +552,15 @@ fn add_config_monitor(config: &mut Config, issues: &mut Vec<ConfigIssue>) -> any
         Err(err) => {
             issue(
                 issues,
-                "config_monitor".to_owned(),
+                key.to_owned(),
                 format!("{}; defaults used", err.message().trim_end()),
             );
-            config.config_monitor = None;
-            return add_config_monitor(config, issues);
+            if config_monitor {
+                config.config_monitor = None;
+            } else {
+                config.self_monitor = None;
+            }
+            return add_builtin(config, issues, id);
         }
     }
     Ok(())
@@ -576,7 +603,7 @@ mod tests {
             http("a"),
             http("b")
         ));
-        assert_eq!(ids(&config), ["a", "b", CONFIG_MONITOR_ID]);
+        assert_eq!(ids(&config), ["a", "b", CONFIG_MONITOR_ID, SELF_MONITOR_ID]);
         assert!(
             has_issue(&config, "monitor bad", "not loaded"),
             "{:?}",
@@ -591,7 +618,7 @@ mod tests {
             "{}[[monitors]]\nid = \"typo\"\nname = \"T\"\ntarget = \"https://example.com\"\nintervall_secs = 60\n",
             http("a")
         ));
-        assert_eq!(ids(&config), ["a", CONFIG_MONITOR_ID]);
+        assert_eq!(ids(&config), ["a", CONFIG_MONITOR_ID, SELF_MONITOR_ID]);
         assert!(
             has_issue(&config, "monitor typo", "not loaded"),
             "{:?}",
@@ -602,7 +629,7 @@ mod tests {
     #[test]
     fn duplicate_ids_keep_the_first() {
         let config = load(&format!("{}{}", http("a"), http("a")));
-        assert_eq!(ids(&config), ["a", CONFIG_MONITOR_ID]);
+        assert_eq!(ids(&config), ["a", CONFIG_MONITOR_ID, SELF_MONITOR_ID]);
         assert!(has_issue(&config, "monitor a", "duplicate"));
     }
 
@@ -678,7 +705,7 @@ mod tests {
             http("a")
         ));
         assert_eq!(config.brokers.len(), 0);
-        assert_eq!(ids(&config), ["a", CONFIG_MONITOR_ID]);
+        assert_eq!(ids(&config), ["a", CONFIG_MONITOR_ID, SELF_MONITOR_ID]);
         assert!(has_issue(&config, "broker home", "not loaded"));
         assert!(has_issue(&config, "monitor sensor", "is not loaded"));
     }
@@ -696,6 +723,22 @@ mod tests {
             "[config_monitor]\nname = \"Hora: Konfiguration\"\ngroup = \"Watchdog\"\n{}{}",
             http("a"),
             http(CONFIG_MONITOR_ID)
+        ));
+        let config_self = load(&format!(
+            "[self_monitor]\ngroup = \"Watchdog\"\n{}{}",
+            http("a"),
+            http(SELF_MONITOR_ID)
+        ));
+        assert_eq!(
+            config_self
+                .find_monitor(SELF_MONITOR_ID)
+                .and_then(|m| m.group.as_deref()),
+            Some("Watchdog")
+        );
+        assert!(has_issue(
+            &config_self,
+            &format!("monitor {SELF_MONITOR_ID}"),
+            "reserved"
         ));
         let builtin = config
             .find_monitor(CONFIG_MONITOR_ID)
@@ -723,7 +766,7 @@ mod tests {
     fn a_clean_file_has_no_issues() {
         let config = load(&http("a"));
         assert_eq!(config.issues.len(), 0, "{:?}", config.issues);
-        assert_eq!(ids(&config), ["a", CONFIG_MONITOR_ID]);
+        assert_eq!(ids(&config), ["a", CONFIG_MONITOR_ID, SELF_MONITOR_ID]);
     }
 
     #[test]

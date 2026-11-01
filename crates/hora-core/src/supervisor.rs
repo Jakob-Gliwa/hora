@@ -81,7 +81,7 @@ impl<T: PartialEq> Fleet<T> {
     /// Remove (and log) every task that finished on its own - only a panic
     /// does that before shutdown - so the next reconcile restarts it with its
     /// alert state. Returns whether any was found.
-    async fn reap_dead(&mut self, what: &str) -> bool {
+    async fn reap_dead(&mut self, what: &str, health: &crate::self_check::SelfHealth) -> bool {
         let dead: Vec<String> = self
             .running
             .iter()
@@ -97,6 +97,7 @@ impl<T: PartialEq> Fleet<T> {
                     .err()
                     .map_or_else(|| "it returned".to_owned(), |err| err.to_string());
                 error!(id = %id, "{what} task stopped unexpectedly ({cause}); restarting it");
+                health.task_died(what, id, chrono::Utc::now().timestamp());
             }
         }
         !dead.is_empty()
@@ -130,6 +131,7 @@ struct Deps {
     /// gets a clone.
     alerts: mpsc::UnboundedSender<AlertMsg>,
     last_tick: Arc<AtomicU64>,
+    self_health: Arc<crate::self_check::SelfHealth>,
 }
 
 /// A handle to the running supervisor: the live config and the hot-swappable
@@ -139,6 +141,8 @@ pub struct Handle {
     pub notifier: Notifiers,
     /// The supervise task; await it on shutdown to drain the monitor tasks.
     pub task: JoinHandle<()>,
+    /// Task deaths and a dead coalescer, for the self-check and the heartbeat.
+    pub self_health: Arc<crate::self_check::SelfHealth>,
 }
 
 /// Start supervising: build the notifier set, spawn the initial monitors and the
@@ -170,7 +174,9 @@ pub fn start(
         notifier: Arc::clone(&notifier),
         alerts: alerts_tx,
         last_tick,
+        self_health: Arc::default(),
     };
+    let self_health = Arc::clone(&deps.self_health);
     let supervisor_rx = rx.clone();
     let task = tokio::spawn(async move {
         supervise(tx, supervisor_rx, config_path, deps, coalescer, shutdown).await;
@@ -180,6 +186,7 @@ pub fn start(
         config: rx,
         notifier,
         task,
+        self_health,
     }
 }
 
@@ -213,14 +220,15 @@ async fn supervise(
                 if *shutdown.borrow() {
                     break;
                 }
-                if monitors.reap_dead("monitor").await {
+                if monitors.reap_dead("monitor", &deps.self_health).await {
                     reconcile(&mut monitors, &rx, &deps, &shutdown);
                 }
-                if peers.reap_dead("peer watch").await {
+                if peers.reap_dead("peer watch", &deps.self_health).await {
                     reconcile_peers(&mut peers, &rx, &deps, &shutdown);
                 }
                 if coalescer.is_finished() && !coalescer_dead_logged {
                     coalescer_dead_logged = true;
+                    deps.self_health.coalescer_died();
                     error!("the alert coalescer stopped: down and recovered alerts can no longer be delivered until restart");
                 }
                 continue;

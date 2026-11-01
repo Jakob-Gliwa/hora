@@ -152,7 +152,7 @@ pub(super) fn validate(config: &Config) -> anyhow::Result<()> {
         // a bare id may be acceptable on a private network.
         if monitor.kind() == Kind::Push
             && monitor.push_token.is_none()
-            && monitor.id != super::CONFIG_MONITOR_ID
+            && !super::is_builtin_monitor(&monitor.id)
         {
             tracing::warn!(
                 "monitor {}: push monitor has no push_token - its id appears on the \
