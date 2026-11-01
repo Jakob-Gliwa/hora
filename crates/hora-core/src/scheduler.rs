@@ -228,6 +228,10 @@ async fn run(
         last_tick,
         alert_state,
     } = deps;
+    let mut mqtt_check = match &monitor.spec {
+        MonitorKind::Mqtt(spec) => Some(mqtt.check(spec)),
+        _ => None,
+    };
     // Fixed cadence: the tick interval does not drift by the probe duration.
     // The first tick is phase-shifted per monitor so a fleet sharing the same
     // interval doesn't probe - and insert - in lockstep at boot and then on
@@ -318,7 +322,14 @@ async fn run(
         let outcome = if let Some(push) = &mut heartbeat {
             push.evaluate(&store, &monitor).await
         } else {
-            tick_outcome(&client, &store, &monitor, exec_dir.as_deref(), &mqtt).await
+            tick_outcome(
+                &client,
+                &store,
+                &monitor,
+                exec_dir.as_deref(),
+                mqtt_check.as_mut(),
+            )
+            .await
         };
         let Some(outcome) = outcome else {
             continue;
@@ -762,7 +773,7 @@ async fn tick_outcome(
     store: &Store,
     monitor: &Monitor,
     exec_dir: Option<&std::path::Path>,
-    mqtt: &crate::mqtt::MqttHub,
+    mqtt: Option<&mut crate::mqtt::Check<'_>>,
 ) -> Option<Outcome> {
     let outcome = match &monitor.spec {
         MonitorKind::Push(_) => return None, // Evaluated by the event/deadline driver.
@@ -774,7 +785,7 @@ async fn tick_outcome(
                 "HORA_EXEC_DIR is not set".to_owned(),
             ),
         },
-        MonitorKind::Mqtt(spec) => mqtt.outcome(spec),
+        MonitorKind::Mqtt(_) => mqtt?.outcome(),
         MonitorKind::Http(spec) => probe::run(client, monitor, NetworkProbe::Http(spec)).await,
         MonitorKind::Tcp(spec) => probe::run(client, monitor, NetworkProbe::Tcp(spec)).await,
         MonitorKind::Icmp(spec) => probe::run(client, monitor, NetworkProbe::Icmp(spec)).await,

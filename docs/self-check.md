@@ -8,6 +8,8 @@ process, a wedged scheduler and a broken database. The built-in monitor
   periods (interval or timeout, whichever is longer) plus a minute. Push
   monitors watch their own deadline and are skipped; a monitor that was just
   added gets the same grace before it counts.
+  The timestamps come from one indexed lookup per active monitor, so the check
+  does not scan the stored history. No time cutoff hides slow-cadence monitors.
 - **A crashed monitor or peer-watch task** within the last hour. Hora restarts
   such tasks on its own; the self-check makes a crash loop visible.
 - **A failing notification channel**: at least `[alerts].channel_fail_threshold`

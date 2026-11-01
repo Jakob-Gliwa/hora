@@ -19,8 +19,12 @@ fn spec(config: &Config, id: &str) -> MqttSpec {
 }
 
 async fn wait_status(hub: &MqttHub, spec: &MqttSpec, up: bool) {
+    wait_cached_status(&mut hub.check(spec), up).await;
+}
+
+async fn wait_cached_status(check: &mut hora_core::mqtt::Check<'_>, up: bool) {
     tokio::time::timeout(Duration::from_secs(20), async {
-        while hub.outcome(spec).is_up() != up {
+        while check.outcome().is_up() != up {
             tokio::time::sleep(Duration::from_millis(25)).await;
         }
     })
@@ -83,6 +87,7 @@ async fn mqtt_mosquitto_retained_periodic_restart_reload_and_one_connection() {
     let (config_tx, config_rx) = watch::channel(Arc::clone(&config));
     let (shutdown, stopped) = watch::channel(false);
     let (hub, task) = hora_core::mqtt::spawn(config_rx, stopped);
+    let mut metric_check = hub.check(&metric);
     wait_status(&hub, &retained, true).await;
     assert!(!hub.outcome(&periodic).is_up());
     publisher
@@ -98,14 +103,14 @@ async fn mqtt_mosquitto_retained_periodic_restart_reload_and_one_connection() {
         .send()
         .await
         .unwrap();
-    wait_status(&hub, &metric, true).await;
+    wait_cached_status(&mut metric_check, true).await;
     publisher
         .publish("test/metric", r#"{"value":9}"#)
         .qos(QoS::AtLeastOnce)
         .send()
         .await
         .unwrap();
-    wait_status(&hub, &metric, false).await;
+    wait_cached_status(&mut metric_check, false).await;
     wait_status(&hub, &periodic, false).await;
     // Broker counts both this publisher and Hora: 18 monitors add ONE client.
     tokio::time::timeout(Duration::from_secs(10), async {
@@ -123,6 +128,10 @@ async fn mqtt_mosquitto_retained_periodic_restart_reload_and_one_connection() {
     );
     docker("stop", &container).await;
     wait_status(&hub, &retained, false).await;
+    assert_eq!(
+        metric_check.outcome().reason,
+        Some(hora_core::probe::FailureKind::ConnectionFailed)
+    );
     docker("start", &container).await;
     tokio::time::timeout(Duration::from_secs(20), async {
         while !publisher.is_connected() {
@@ -133,6 +142,20 @@ async fn mqtt_mosquitto_retained_periodic_restart_reload_and_one_connection() {
     .unwrap_or_else(|err| panic!("{err}: {:?}", publisher.session_phase().borrow()));
     // Persistence is off: a pre-disconnect payload must never revive the monitor.
     assert!(!hub.outcome(&periodic).is_up());
+    assert!(!metric_check.outcome().is_up());
+    publisher
+        .publish("test/metric", r#"{"value":11}"#)
+        .qos(QoS::AtLeastOnce)
+        .send()
+        .await
+        .unwrap();
+    wait_cached_status(&mut metric_check, true).await;
+    // The same cached message must be re-evaluated under changed assertions.
+    let changed_raw = raw.replace("jq='.value > 10'", "jq='.value > 20'");
+    let changed = Arc::new(hora_core::config::parse(&changed_raw).unwrap());
+    let changed_metric = spec(&changed, "metric");
+    config_tx.send(changed).unwrap();
+    wait_cached_status(&mut hub.check(&changed_metric), false).await;
     publisher
         .publish("test/state", "online")
         .retain(true)
@@ -152,6 +175,24 @@ async fn mqtt_mosquitto_retained_periodic_restart_reload_and_one_connection() {
     removed.monitors.clear();
     config_tx.send(Arc::new(removed)).unwrap();
     wait_status(&hub, &retained, false).await;
+    // Recreating the broker hub must not reuse a previous message generation.
+    config_tx.send(Arc::clone(&config)).unwrap();
+    wait_status(&hub, &retained, true).await;
+    assert!(!metric_check.outcome().is_up());
+    publisher
+        .publish("test/metric", r#"{"value":9}"#)
+        .qos(QoS::AtLeastOnce)
+        .send()
+        .await
+        .unwrap();
+    wait_cached_status(&mut metric_check, false).await;
+    publisher
+        .publish("test/metric", r#"{"value":11}"#)
+        .qos(QoS::AtLeastOnce)
+        .send()
+        .await
+        .unwrap();
+    wait_cached_status(&mut metric_check, true).await;
     shutdown.send(true).unwrap();
     tokio::time::timeout(Duration::from_secs(5), task)
         .await

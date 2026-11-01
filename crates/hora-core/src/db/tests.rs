@@ -12,6 +12,42 @@ use crate::probe::FailureKind;
 use crate::status::CheckStatus;
 
 #[tokio::test]
+async fn latest_check_times_seek_only_requested_monitors() {
+    let store = Store::in_memory().await;
+    insert(&store, "active", 10, 1, None).await;
+    insert(&store, "active", 20, 0, None).await;
+    insert(&store, "old", 1, 1, None).await;
+    insert(&store, "unrequested", 30, 1, None).await;
+    insert(&store, "quoted\"id", 40, 1, None).await;
+    let ids = ["active", "old", "missing", "quoted\"id", "active"];
+    let times = last_check_times(&store, &ids).await.unwrap();
+    assert_eq!(times.len(), 3);
+    assert_eq!(times["active"], 20); // A failed check still proves liveness.
+    assert_eq!(times["old"], 1); // No arbitrary time cutoff.
+    assert_eq!(times["quoted\"id"], 40);
+    assert!(last_check_times(&store, &[]).await.unwrap().is_empty());
+
+    // Guard the property that matters as history grows: no scan of checks.
+    // Both fragments are fixed SQL; ids remain bound parameters.
+    let plan: Vec<(i64, i64, i64, String)> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
+        "EXPLAIN QUERY PLAN {}",
+        super::checks::LAST_CHECK_TIMES
+    )))
+    .bind(serde_json::to_string(&ids).unwrap())
+    .fetch_all(store.sqlx())
+    .await
+    .unwrap();
+    assert!(
+        plan.iter().any(|row| row.3.contains("SEARCH checks")),
+        "{plan:?}"
+    );
+    assert!(
+        !plan.iter().any(|row| row.3.contains("SCAN checks")),
+        "{plan:?}"
+    );
+}
+
+#[tokio::test]
 async fn a_release_alerts_once_and_a_new_project_starts_afresh() {
     let store = Store::in_memory().await;
     assert_eq!(release_watch(&store, "chat").await.unwrap(), None);

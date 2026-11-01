@@ -261,19 +261,34 @@ pub async fn check_samples(
     .await
 }
 
-/// The latest check time of every monitor that has one (the self-check's input).
+// One index seek per requested id. GROUP BY monitor_id with MAX(time) scans
+// the entire history, even with the covering monitor/time index.
+pub(super) const LAST_CHECK_TIMES: &str = "SELECT ids.value, (SELECT time FROM checks WHERE monitor_id = ids.value \
+     ORDER BY time DESC LIMIT 1) FROM json_each(?) AS ids";
+
+/// The latest check time of the requested monitors that have one.
+/// Unrelated history is never scanned; missing ids are absent from the result.
 ///
 /// # Errors
 ///
 /// A database error.
 pub async fn last_check_times(
     store: &Store,
+    monitor_ids: &[&str],
 ) -> sqlx::Result<std::collections::HashMap<String, i64>> {
-    let rows: Vec<(String, i64)> =
-        sqlx::query_as("SELECT monitor_id, MAX(time) FROM checks GROUP BY monitor_id")
-            .fetch_all(store.sqlx())
-            .await?;
-    Ok(rows.into_iter().collect())
+    if monitor_ids.is_empty() {
+        return Ok(std::collections::HashMap::new());
+    }
+    let ids =
+        serde_json::to_string(monitor_ids).map_err(|err| sqlx::Error::Encode(Box::new(err)))?;
+    let rows: Vec<(String, Option<i64>)> = sqlx::query_as(LAST_CHECK_TIMES)
+        .bind(ids)
+        .fetch_all(store.sqlx())
+        .await?;
+    Ok(rows
+        .into_iter()
+        .filter_map(|(id, time)| time.map(|t| (id, t)))
+        .collect())
 }
 
 /// The timestamp of a monitor's most recent check, if any (push staleness).

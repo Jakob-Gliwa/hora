@@ -1,7 +1,11 @@
 //! Shared mqtt-glide connections and bounded, latest-message-only caches.
 
+#[cfg(test)]
+mod benchmark;
+
 use std::collections::{HashMap, HashSet};
 use std::num::{NonZeroU16, NonZeroU32, NonZeroUsize};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, PoisonError, RwLock, Weak};
 use std::time::Duration;
 
@@ -116,6 +120,25 @@ pub(crate) fn validate(config: &Config) -> anyhow::Result<()> {
 struct Message {
     payload: Arc<[u8]>,
     received: Instant,
+    generation: u64,
+}
+
+impl Message {
+    fn new(payload: &[u8], received: Instant) -> Self {
+        // Shared across broker replacements, so a cache in an unchanged monitor
+        // cannot mistake the first message after a reload for an older one.
+        static GENERATION: AtomicU64 = AtomicU64::new(1);
+        Self {
+            payload: Arc::from(payload),
+            received,
+            generation: GENERATION.fetch_add(1, Ordering::Relaxed),
+        }
+    }
+}
+
+struct ContentCache {
+    generation: u64,
+    error: Option<String>,
 }
 
 #[derive(Default)]
@@ -148,10 +171,7 @@ impl BrokerState {
         let mut topics = self.topics.lock().unwrap_or_else(PoisonError::into_inner);
         if let Some(entry) = topics.get_mut(topic) {
             // Copy exactly the payload, avoiding retaining a large codec buffer.
-            entry.message = (payload.len() <= self.cap).then(|| Message {
-                payload: Arc::from(payload),
-                received: now,
-            });
+            entry.message = (payload.len() <= self.cap).then(|| Message::new(payload, now));
         }
     }
 
@@ -166,7 +186,7 @@ impl BrokerState {
         }
     }
 
-    fn outcome(&self, spec: &MqttSpec, now: Instant) -> Outcome {
+    fn outcome(&self, spec: &MqttSpec, now: Instant, cache: &mut Option<ContentCache>) -> Outcome {
         let Some(client) = self.client.get().filter(|c| c.is_connected()) else {
             return Outcome::down(
                 FailureKind::ConnectionFailed,
@@ -196,7 +216,7 @@ impl BrokerState {
                 "MQTT subscription not ready".into(),
             );
         }
-        evaluate(spec, message.as_ref(), now)
+        evaluate(spec, message.as_ref(), now, Some(cache))
     }
 }
 
@@ -211,7 +231,12 @@ impl LifecycleHook for Lifecycle {
     }
 }
 
-fn evaluate(spec: &MqttSpec, message: Option<&Message>, now: Instant) -> Outcome {
+fn evaluate(
+    spec: &MqttSpec,
+    message: Option<&Message>,
+    now: Instant,
+    cache: Option<&mut Option<ContentCache>>,
+) -> Outcome {
     let Some(message) = message else {
         return Outcome::down(
             FailureKind::MissingHeartbeat,
@@ -226,6 +251,29 @@ fn evaluate(spec: &MqttSpec, message: Option<&Message>, now: Instant) -> Outcome
             "MQTT message is stale".into(),
         );
     }
+    // Keyword-only checks are cheaper than memoization for tiny state strings.
+    // Keep just the last JSON assertion result, never a payload or parsed tree.
+    if let Some(cache) = cache.filter(|_| spec.json.is_some() || spec.jq.is_some()) {
+        if let Some(cached) = cache
+            .as_ref()
+            .filter(|c| c.generation == message.generation)
+        {
+            return cached.error.as_ref().map_or_else(
+                || Outcome::up(false, None, None),
+                |error| Outcome::down(FailureKind::Content, error.clone()),
+            );
+        }
+        let outcome = evaluate_content(spec, message);
+        *cache = Some(ContentCache {
+            generation: message.generation,
+            error: outcome.error.clone(),
+        });
+        return outcome;
+    }
+    evaluate_content(spec, message)
+}
+
+fn evaluate_content(spec: &MqttSpec, message: &Message) -> Outcome {
     if spec.max_body_kb.is_some_and(|kb| {
         message.payload.len()
             > usize::try_from(kb)
@@ -260,14 +308,44 @@ fn evaluate(spec: &MqttSpec, message: Option<&Message>, now: Instant) -> Outcome
 pub struct MqttHub {
     brokers: RwLock<HashMap<String, Arc<BrokerState>>>,
 }
+
+/// One monitor's evaluator. Its borrowed specification cannot change under a
+/// cached result; a changed monitor gets a new evaluator on supervisor restart.
+/// Broker health and freshness are checked on every call, including cache hits.
+pub struct Check<'a> {
+    hub: &'a MqttHub,
+    spec: &'a MqttSpec,
+    cache: Option<ContentCache>,
+}
+
 impl MqttHub {
+    /// An evaluator kept for the lifetime of one monitor task.
+    #[must_use]
+    pub fn check<'a>(&'a self, spec: &'a MqttSpec) -> Check<'a> {
+        Check {
+            hub: self,
+            spec,
+            cache: None,
+        }
+    }
+
+    /// A one-off check. Repeated callers should keep a [`Check`] instead.
     #[must_use]
     pub fn outcome(&self, spec: &MqttSpec) -> Outcome {
+        self.check(spec).outcome()
+    }
+}
+
+impl Check<'_> {
+    /// Evaluate the latest message; only unchanged JSON content is memoized.
+    #[must_use]
+    pub fn outcome(&mut self) -> Outcome {
         let state = self
+            .hub
             .brokers
             .read()
             .unwrap_or_else(PoisonError::into_inner)
-            .get(&spec.broker)
+            .get(&self.spec.broker)
             .cloned();
         state.map_or_else(
             || {
@@ -276,7 +354,7 @@ impl MqttHub {
                     "MQTT broker not ready".into(),
                 )
             },
-            |s| s.outcome(spec, Instant::now()),
+            |s| s.outcome(self.spec, Instant::now(), &mut self.cache),
         )
     }
 }
@@ -486,15 +564,12 @@ mod tests {
     fn mqtt_missing_stale_keyword_inversion_and_bounded_cache() {
         let now = Instant::now();
         let mut spec = spec();
-        assert!(!evaluate(&spec, None, now).is_up());
-        let msg = Message {
-            payload: Arc::from(b"online".as_slice()),
-            received: now,
-        };
-        assert!(evaluate(&spec, Some(&msg), now).is_up());
-        assert!(!evaluate(&spec, Some(&msg), now + Duration::from_secs(11)).is_up());
+        assert!(!evaluate(&spec, None, now, None).is_up());
+        let msg = Message::new(b"online", now);
+        assert!(evaluate(&spec, Some(&msg), now, None).is_up());
+        assert!(!evaluate(&spec, Some(&msg), now + Duration::from_secs(11), None).is_up());
         spec.keyword.as_mut().unwrap().invert = true;
-        assert!(!evaluate(&spec, Some(&msg), now).is_up());
+        assert!(!evaluate(&spec, Some(&msg), now, None).is_up());
         let state = BrokerState::new(&[spec.topic.clone()], 16);
         state.receive("unexpected", b"data", now);
         state.receive(&spec.topic, b"online", now);
@@ -521,11 +596,128 @@ mod tests {
             (b"null".as_slice(), false),
             (b"invalid".as_slice(), false),
         ] {
-            let message = Message {
-                payload: Arc::from(payload),
-                received: now,
-            };
-            assert_eq!(evaluate(&spec, Some(&message), now).is_up(), up);
+            let message = Message::new(payload, now);
+            assert_eq!(evaluate(&spec, Some(&message), now, None).is_up(), up);
+        }
+    }
+
+    #[test]
+    fn memoized_content_keeps_freshness_and_new_messages_live() {
+        let now = Instant::now();
+        let mut spec = spec();
+        spec.keyword = None;
+        spec.max_age_secs = Some(900);
+        spec.jq = Some(crate::assertion::JqAssert {
+            query: crate::config::Compiled::parse(".value > 10").unwrap(),
+            expected: None,
+            operator: crate::assertion::Comparison::Eq,
+        });
+        let mut cache = None;
+        for (payload, up) in [
+            (br#"{"value":11}"#.as_slice(), true),
+            (br#"{"value":9}"#.as_slice(), false),
+            (b"invalid".as_slice(), false),
+            (br#"{"value":12}"#.as_slice(), true),
+        ] {
+            // Identical timestamps must not make different messages share results.
+            let message = Message::new(payload, now);
+            for _ in 0..3 {
+                let outcome = evaluate(&spec, Some(&message), now, Some(&mut cache));
+                assert_eq!(outcome.is_up(), up);
+                assert_eq!(
+                    outcome.error,
+                    evaluate(&spec, Some(&message), now, None).error
+                );
+            }
+            assert_eq!(
+                Arc::strong_count(&message.payload),
+                1,
+                "cache retained the payload"
+            );
+        }
+        let message = Message::new(br#"{"value":11}"#, now);
+        assert!(evaluate(&spec, Some(&message), now, Some(&mut cache)).is_up());
+        assert!(
+            evaluate(
+                &spec,
+                Some(&message),
+                now + Duration::from_mins(15),
+                Some(&mut cache)
+            )
+            .is_up()
+        );
+        let stale = evaluate(
+            &spec,
+            Some(&message),
+            now + Duration::from_secs(901),
+            Some(&mut cache),
+        );
+        assert_eq!(stale.reason, Some(FailureKind::MissingHeartbeat));
+        assert!(!evaluate(&spec, None, now, Some(&mut cache)).is_up());
+    }
+
+    #[test]
+    fn evaluators_do_not_share_assertions_and_keyword_checks_do_not_cache() {
+        let now = Instant::now();
+        let mut cache = None;
+        assert!(
+            evaluate(
+                &spec(),
+                Some(&Message::new(b"online", now)),
+                now,
+                Some(&mut cache)
+            )
+            .is_up()
+        );
+        assert!(cache.is_none());
+        let json = |expected: i64| MqttSpec {
+            keyword: None,
+            json: Some(crate::config::JsonAssert {
+                query: crate::config::Compiled::parse("$.value").unwrap(),
+                expected: Some(expected.to_string()),
+            }),
+            ..spec()
+        };
+        let first = json(11);
+        let second = json(12);
+        let hub = MqttHub::default();
+        let mut first_check = hub.check(&first);
+        let mut second_check = hub.check(&second);
+        let message = Message::new(br#"{"value":11}"#, now);
+        assert!(
+            evaluate(
+                first_check.spec,
+                Some(&message),
+                now,
+                Some(&mut first_check.cache)
+            )
+            .is_up()
+        );
+        assert!(
+            !evaluate(
+                second_check.spec,
+                Some(&message),
+                now,
+                Some(&mut second_check.cache)
+            )
+            .is_up()
+        );
+
+        let mut limited = first.clone();
+        limited.max_body_kb = Some(1);
+        let mut limited_check = hub.check(&limited);
+        let message = Message::new(&[b' '; 1025], now);
+        for _ in 0..2 {
+            let outcome = evaluate(
+                limited_check.spec,
+                Some(&message),
+                now,
+                Some(&mut limited_check.cache),
+            );
+            assert_eq!(
+                outcome.error.as_deref(),
+                Some("MQTT payload exceeds assertion limit")
+            );
         }
     }
 }

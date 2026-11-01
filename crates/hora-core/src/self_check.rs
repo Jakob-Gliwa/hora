@@ -192,7 +192,13 @@ pub fn spawn(
                     "every notification channel is failing: Hora withholds its external heartbeat"
                 );
             }
-            let last_checks = match db::last_check_times(&store).await {
+            let checked_ids: Vec<&str> = snapshot
+                .monitors
+                .iter()
+                .filter(|m| !matches!(m.spec, MonitorKind::Push(_)) && !is_builtin_monitor(&m.id))
+                .map(|m| m.id.as_str())
+                .collect();
+            let last_checks = match db::last_check_times(&store, &checked_ids).await {
                 Ok(times) => times,
                 Err(err) => {
                     warn!("self-check cannot read the last checks: {err:#}");
