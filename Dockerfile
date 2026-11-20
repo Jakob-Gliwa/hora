@@ -2,7 +2,7 @@
 # Local builds compile from source; CI supplies its natively built, cached binary.
 # Both produce a fully static musl binary (Alpine's native Rust target).
 ARG BUILD_MODE=source
-FROM rust:1.99.1-alpine AS build-source
+FROM rust:1.99.1-alpine@sha256:44819b27be4c97b0e4d7203bd2e02c4820f97700211b6a37fb4c246a2de59383 AS build-source
 RUN apk add --no-cache musl-dev linux-headers cmake make perl clang clang-dev
 WORKDIR /build
 COPY Cargo.toml Cargo.lock ./
@@ -18,7 +18,7 @@ COPY hora /hora
 FROM build-${BUILD_MODE} AS binary
 
 # Runtime: Alpine + CA certificates; busybox wget serves the healthcheck.
-FROM alpine:3.24 AS runtime
+FROM alpine:3.24@sha256:f59abe656b692d901e184be3445e084786602108599d2a51d229c0f5a48c71bf AS runtime
 RUN apk add --no-cache ca-certificates \
     && addgroup -S -g 10001 hora \
     && adduser -S -D -H -G hora -u 10001 hora \

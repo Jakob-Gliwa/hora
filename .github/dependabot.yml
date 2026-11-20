@@ -1,0 +1,22 @@
+version: 2
+# scripts/automate-updates.py merges what passes its policy (compatible
+# Cargo.lock updates, base image digests); everything else waits for review.
+updates:
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: daily
+    groups:
+      rust-patches:
+        update-types: [patch]
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    # Let compromised action releases surface before they reach the publish job.
+    cooldown:
+      default-days: 7
+  - package-ecosystem: docker
+    directory: /
+    schedule:
+      interval: weekly

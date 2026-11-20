@@ -73,10 +73,12 @@ jobs:
           persist-credentials: false
       - uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
 
-  # Compile and smoke-test alongside check/deny. No registry write permission.
-  # Only the publish job below may update an Unraid image, after all gates pass.
+  # Compile and smoke-test alongside check/deny, on pull requests too: the main
+  # ruleset requires this check before scripts/automate-updates.py may merge.
+  # No registry write permission. Only the publish job below may update an
+  # Unraid image, after all gates pass.
   docker:
-    if: github.repository == 'Jakob-Gliwa/hora' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
+    if: github.repository == 'Jakob-Gliwa/hora'
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     outputs:
