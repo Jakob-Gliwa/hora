@@ -41,7 +41,7 @@ x509-parser.workspace = true
 # std does not expose and `unsafe` (libc) is forbidden. Already in the tree.
 # `fs` adds `statvfs`, for the free-disk check of `hora compact`.
 [target.'cfg(unix)'.dependencies]
-nix = { version = "0.31", default-features = false, features = ["signal", "process", "fs"] }
+nix = { version = "0.32", default-features = false, features = ["signal", "process", "fs"] }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt", "macros", "process"] }
