@@ -240,19 +240,21 @@ async fn observe(
     for monitor in &config.monitors {
         first_seen.entry(monitor.id.clone()).or_insert(now);
     }
-    let mut last_checks = HashMap::new();
-    for monitor in config.monitors.iter().filter(|monitor| watched(monitor)) {
-        match db::last_check_time(store, &monitor.id).await {
-            Ok(Some(time)) => {
-                last_checks.insert(monitor.id.clone(), time);
-            }
-            Ok(None) => {}
-            Err(err) => {
-                warn!(monitor = %monitor.id, "self-check cannot read the last check: {err:#}");
-                last_checks.insert(monitor.id.clone(), now);
-            }
+    // One statement for all of them: a query per monitor costs a pool round
+    // trip each, about twenty times the CPU for a hundred monitors.
+    let ids: Vec<&str> = config
+        .monitors
+        .iter()
+        .filter(|monitor| watched(monitor))
+        .map(|monitor| monitor.id.as_str())
+        .collect();
+    let last_checks = match db::last_check_times(store, &ids).await {
+        Ok(times) => times,
+        Err(err) => {
+            warn!("self-check cannot read the last checks: {err:#}");
+            ids.iter().map(|id| ((*id).to_owned(), now)).collect()
         }
-    }
+    };
     let channels = notifier
         .load()
         .health_snapshot()
