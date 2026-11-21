@@ -336,7 +336,15 @@ fn evaluate(
     evaluate_content(spec, message)
 }
 
+#[cfg(test)]
+thread_local! {
+    /// How often this thread judged a payload's content.
+    static CONTENT_EVALUATIONS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
 fn evaluate_content(spec: &MqttSpec, message: &Message) -> Outcome {
+    #[cfg(test)]
+    CONTENT_EVALUATIONS.with(|count| count.set(count.get() + 1));
     if spec.max_body_kb.is_some_and(|kb| {
         message.payload.len()
             > usize::try_from(kb)
@@ -743,6 +751,53 @@ mod tests {
         );
         assert_eq!(stale.reason, Some(FailureKind::NoMessage));
         assert!(!evaluate(&spec, None, now, Some(&mut cache)).is_up());
+    }
+
+    /// A task's evaluator runs the jq filter once per received message,
+    /// however many ticks find it unchanged in the cache; a message received
+    /// again (same bytes) is judged again, once. Monitors spelling the same
+    /// expression run one compiled program.
+    #[test]
+    fn an_unchanged_message_is_judged_once_by_a_shared_program() {
+        let jq = |id: &str| {
+            format!(
+                "[[monitors]]\nid = \"{id}\"\nname = \"{id}\"\nkind = \"mqtt\"\n\
+                 broker = \"b\"\ntopic = \"t/{id}\"\ninterval_secs = 60\n\
+                 jq = \".power\"\njq_expected = \"100\"\njq_operator = \">\"\n"
+            )
+        };
+        let config = crate::config::parse(&format!(
+            "[page]\n[server]\n[[brokers]]\nname = \"b\"\nurl = \"mqtt://127.0.0.1:1883\"\n{}{}",
+            jq("a"),
+            jq("b")
+        ))
+        .expect("config");
+        let specs: Vec<&MqttSpec> = config
+            .monitors
+            .iter()
+            .map(|monitor| match &monitor.spec {
+                crate::config::MonitorKind::Mqtt(spec) => spec,
+                _ => unreachable!(),
+            })
+            .collect();
+        let program = |spec: &MqttSpec| spec.jq.as_ref().unwrap().query.clone();
+        assert!(program(specs[0]).shares_program_with(&program(specs[1])));
+
+        let evaluations = || CONTENT_EVALUATIONS.with(std::cell::Cell::get);
+        let now = Instant::now();
+        let mut cache = None;
+        let message = Message::new(br#"{"power":230}"#, now);
+        let before = evaluations();
+        for tick in 0..10 {
+            let at = now + Duration::from_secs(tick);
+            assert!(evaluate(specs[0], Some(&message), at, Some(&mut cache)).is_up());
+        }
+        assert_eq!(evaluations() - before, 1);
+        let again = Message::new(br#"{"power":230}"#, now);
+        for _ in 0..10 {
+            assert!(evaluate(specs[0], Some(&again), now, Some(&mut cache)).is_up());
+        }
+        assert_eq!(evaluations() - before, 2);
     }
 
     #[test]

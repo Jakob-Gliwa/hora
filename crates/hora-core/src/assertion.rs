@@ -102,6 +102,12 @@ impl ParseField for JqProgram {
 }
 
 impl JqProgram {
+    /// Whether both run the same compiled program.
+    #[cfg(test)]
+    pub(crate) fn shares_program_with(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+
     /// Require exactly one scalar result; never collect an unbounded output stream.
     ///
     /// # Errors
