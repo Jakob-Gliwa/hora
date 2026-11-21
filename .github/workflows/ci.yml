@@ -62,6 +62,9 @@ jobs:
         run: cargo test --workspace --locked
       - name: Script tests
         run: python3 -m unittest discover -s scripts/tests -p 'test_*.py'
+      # A throwaway Mosquitto container on loopback (Docker is on the runner).
+      - name: MQTT broker integration
+        run: scripts/test-mqtt.sh
       - name: Design tokens in step with brand/tokens.json
         run: python3 brand/src/tokens.py --check
 
