@@ -144,6 +144,7 @@ pub(super) fn validate(config: &Config) -> anyhow::Result<()> {
         );
     }
     let channel_names = validate_channels(config)?;
+    crate::mqtt::validate(config)?;
     validate_reserved(config)?;
     if config.alerts.repeat_alert_secs > 0 {
         validate_period("alerts.repeat_alert_secs", config.alerts.repeat_alert_secs)?;
@@ -177,7 +178,9 @@ pub(super) fn validate(config: &Config) -> anyhow::Result<()> {
         // A probe outliving its interval delays the next tick (the scheduler
         // never overlaps probes), so the effective cadence is the timeout,
         // not the interval. Push monitors probe nothing; their timeout is inert.
-        if monitor.kind() != Kind::Push && monitor.timeout_secs > monitor.interval_secs {
+        if !matches!(monitor.kind(), Kind::Push | Kind::Mqtt)
+            && monitor.timeout_secs > monitor.interval_secs
+        {
             tracing::warn!(
                 "monitor {}: timeout_secs ({}) exceeds interval_secs ({}) - a hung probe \
                  delays the next check by up to the timeout",
@@ -392,7 +395,7 @@ fn validate_confirm(config: &Config) -> anyhow::Result<()> {
     for monitor in &config.monitors {
         anyhow::ensure!(
             !(monitor.confirm_with_peers == Some(true)
-                && matches!(monitor.kind(), Kind::Push | Kind::Exec)),
+                && matches!(monitor.kind(), Kind::Push | Kind::Exec | Kind::Mqtt)),
             "monitor {}: confirm_with_peers needs a network probe (push monitors \
              have no target, and exec checks are local to this host)",
             monitor.id
