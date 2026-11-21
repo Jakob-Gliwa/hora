@@ -3286,6 +3286,28 @@ fn pushover_channel_options_are_validated() {
     }
 }
 
+/// The summary's idle pause: unset by default, bounded when set.
+#[test]
+fn summary_idle_refresh_is_bounded() {
+    assert_eq!(
+        load(MINIMAL).unwrap().server.summary_idle_refresh_secs,
+        None
+    );
+    let at = |secs: &str| {
+        load(&MINIMAL.replace(
+            "[server]",
+            &format!("[server]\nsummary_idle_refresh_secs = {secs}"),
+        ))
+    };
+    assert_eq!(
+        at("300").unwrap().server.summary_idle_refresh_secs,
+        Some(300)
+    );
+    for bad in ["0", "4", "3601"] {
+        assert!(at(bad).is_err(), "{bad}");
+    }
+}
+
 /// What a fork config carries beyond upstream's: a monitor's description
 /// (kept), the database sizing (checked, not applied), and the fork's
 /// built-in monitors (read, warned about, ignored).

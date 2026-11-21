@@ -290,9 +290,16 @@ fn validate_maintenance(config: &Config) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// What this build reads but does not act on yet: the database sizing is
-/// checked for sense.
+/// What this build reads but does not act on yet: the summary's idle pause
+/// is bounded; the database sizing is checked for sense.
 fn validate_reserved(config: &Config) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        config
+            .server
+            .summary_idle_refresh_secs
+            .is_none_or(|secs| (5..=3600).contains(&secs)),
+        "server.summary_idle_refresh_secs must be between 5 and 3600"
+    );
     if let Some(database) = &config.server.database {
         anyhow::ensure!(
             database

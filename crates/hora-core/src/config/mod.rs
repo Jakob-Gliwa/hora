@@ -436,6 +436,14 @@ pub struct Server {
     /// always works too.
     #[serde(default)]
     pub group_tokens: std::collections::HashMap<String, Secret>,
+    /// How long the status summary (pages, `/api/summary`, `/metrics`, the
+    /// peers' poll) waits before its next rebuild while nobody reads it.
+    /// Unset: 30 s. A read after a longer quiet stretch still waits (up to
+    /// 2 s) for a rebuild once what is there is older than 10 s, so a
+    /// longer pause costs no freshness on a page someone opens - only on
+    /// one left open without reloading. Read on every rebuild.
+    #[serde(default)]
+    pub summary_idle_refresh_secs: Option<u64>,
     /// SQLite sizing: `{ cache_kib, max_connections }`. Validated, not yet
     /// applied - the daemon keeps its two fixed pools for now.
     #[serde(default)]
