@@ -181,6 +181,32 @@ As a guide, the image with 300 monitors and a year of history uses about
 18 MiB at rest and 45 MiB at the worst of a connection flood: a 64 MiB
 limit is comfortable. A small fleet (ten monitors) stays under 20 MiB.
 
+### Database and summary sizing
+
+```toml
+[server]
+database = { cache_kib = 2048, max_connections = 4 }
+summary_idle_refresh_secs = 300
+```
+
+Hora opens two connection pools on its database: its own (checks,
+heartbeats, alerts) and one for the status pages' reads, so a busy page
+never delays an alert. Each connection keeps a page cache of `cache_kib`
+(default 4000 KiB). `max_connections` is both pools together: a third,
+rounded up, for Hora's own, the rest for the pages', at least one each.
+Unset, that is 3 + 6 connections: at most 36 MiB of page cache. The
+example above is 2 + 2 connections at 2 MiB, at most 8 MiB, for a small
+container; the pages then queue their parallel queries on two
+connections. What falls out of the cache is still in the OS page cache.
+Read at startup.
+
+The status summary (pages, `/api/summary`, `/metrics`, the peers' poll) is
+rebuilt every 5 s while someone reads it and every
+`summary_idle_refresh_secs` (default 30, 5..3600) while nobody does. The
+first request after a quiet stretch still waits up to 2 s for a fresh build
+once the summary is older than 10 s, so a longer pause saves database
+reads without serving an old page. Read on every rebuild.
+
 A reload that fails validation is refused: Hora logs why and keeps running
 with the previous config.
 

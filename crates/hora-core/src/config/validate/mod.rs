@@ -145,7 +145,7 @@ pub(super) fn validate(config: &Config) -> anyhow::Result<()> {
     }
     let channel_names = validate_channels(config)?;
     crate::mqtt::validate(config)?;
-    validate_reserved(config)?;
+    validate_tuning(config)?;
     if config.alerts.repeat_alert_secs > 0 {
         validate_period("alerts.repeat_alert_secs", config.alerts.repeat_alert_secs)?;
     }
@@ -290,9 +290,9 @@ fn validate_maintenance(config: &Config) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// What this build reads but does not act on yet: the summary's idle pause
-/// is bounded; the database sizing is checked for sense.
-fn validate_reserved(config: &Config) -> anyhow::Result<()> {
+/// The server's tuning keys - the summary's idle pause, the database
+/// sizing - are checked for sense.
+fn validate_tuning(config: &Config) -> anyhow::Result<()> {
     anyhow::ensure!(
         config
             .server

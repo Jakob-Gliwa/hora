@@ -444,8 +444,9 @@ pub struct Server {
     /// one left open without reloading. Read on every rebuild.
     #[serde(default)]
     pub summary_idle_refresh_secs: Option<u64>,
-    /// SQLite sizing: `{ cache_kib, max_connections }`. Validated, not yet
-    /// applied - the daemon keeps its two fixed pools for now.
+    /// SQLite sizing: `{ cache_kib, max_connections }` (see
+    /// `db::PoolSizing::from_settings`). Unset: 4000 KiB of page cache for
+    /// each of 3 + 6 connections. Read at startup.
     #[serde(default)]
     pub database: Option<DatabaseSettings>,
 }
@@ -457,7 +458,8 @@ pub struct DatabaseSettings {
     /// Page cache per connection, KiB.
     #[serde(default)]
     pub cache_kib: Option<u32>,
-    /// Connections of the pool.
+    /// Connections of both pools together: a third (rounded up) for the
+    /// daemon's own, the rest for the status pages', at least one each.
     #[serde(default)]
     pub max_connections: Option<u32>,
 }

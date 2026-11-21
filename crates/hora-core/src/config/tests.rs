@@ -3309,7 +3309,7 @@ fn summary_idle_refresh_is_bounded() {
 }
 
 /// What a fork config carries beyond upstream's: a monitor's description
-/// (kept), the database sizing (checked, not applied), and the fork's
+/// (kept), the database sizing (checked), and the fork's
 /// built-in monitors (read, warned about, ignored).
 #[test]
 fn fork_sections_load() {
