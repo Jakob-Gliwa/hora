@@ -165,9 +165,10 @@ impl fmt::Display for Caveat {
 /// on Linux only, and one that cannot be read is no finding.
 #[must_use]
 pub fn caveats(config_path: &Path) -> Vec<Caveat> {
-    mount_table(config_path)
-        .map(|(mountinfo, file, resolved)| mount_caveats(&mountinfo, &file, &resolved))
-        .unwrap_or_default()
+    let Some((mountinfo, file, resolved)) = mount_table(config_path) else {
+        return Vec::new();
+    };
+    mount_caveats(&mountinfo, &file, &resolved)
 }
 
 /// The type of the filesystem the config is on, when its notifications can
