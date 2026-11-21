@@ -149,6 +149,11 @@ rate_limit_burst = 30
 # type = "pushover"                # Pushover notifications
 # token = "${PUSHOVER_TOKEN}"      # application API token
 # user = "${PUSHOVER_USER}"        # user key (recipient)
+# priority = -1                    # optional; -2..2 for every message of this
+#                                  # channel instead of the event's urgency
+# sound = "none"                   # optional; the sound played (default: user's)
+# retry = 60                       # priority 2 only (required there): repeat
+# expire = 3600                    # every 60 s until acknowledged, for an hour
 
 # Alerting and retention policy, independent of any channel.
 [alerts]

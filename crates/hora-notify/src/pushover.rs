@@ -17,6 +17,21 @@ pub struct PushoverNotifier {
     client: Client,
     token: String,
     user: String,
+    options: PushoverOptions,
+}
+
+/// A channel's own settings, on top of the event's urgency: Pushover's
+/// `priority` (-2 to 2) for every message the channel sends, the `sound`
+/// the recipient hears, and for an emergency (priority 2) how often
+/// Pushover repeats it until acknowledged (`retry`, seconds) and for how
+/// long (`expire`). Unset, the urgency picks the priority and the
+/// recipient's settings the sound. Validated with the config.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct PushoverOptions {
+    pub priority: Option<i8>,
+    pub sound: Option<String>,
+    pub retry: Option<u32>,
+    pub expire: Option<u32>,
 }
 
 impl PushoverNotifier {
@@ -26,7 +41,38 @@ impl PushoverNotifier {
             client,
             token,
             user,
+            options: PushoverOptions::default(),
         }
+    }
+
+    /// The channel's own priority, sound and emergency settings.
+    #[must_use]
+    pub fn with_options(mut self, options: PushoverOptions) -> Self {
+        self.options = options;
+        self
+    }
+
+    /// What is posted for `event`: the message, with the channel's
+    /// priority over the event's and its sound and emergency settings.
+    fn payload(&self, event: Event<'_>) -> serde_json::Value {
+        let (title, message, priority) = Self::message(event);
+        let mut payload = serde_json::json!({
+            "token": self.token,
+            "user": self.user,
+            "message": message,
+            "title": title,
+            "priority": self.options.priority.unwrap_or(priority),
+        });
+        if let Some(sound) = &self.options.sound {
+            payload["sound"] = sound.as_str().into();
+        }
+        if let Some(retry) = self.options.retry {
+            payload["retry"] = retry.into();
+        }
+        if let Some(expire) = self.options.expire {
+            payload["expire"] = expire.into();
+        }
+        payload
     }
 
     /// The title (the event's headline), the message under it and the
@@ -39,7 +85,8 @@ impl PushoverNotifier {
 }
 
 /// Pushover priority: -1 quiet, 0 normal, 1 high. We stop at 1 - priority 2
-/// (emergency) would require retry/expire parameters.
+/// (emergency) requires retry/expire parameters, so only a channel that
+/// sets them asks for it (see [`PushoverOptions`]).
 fn priority(urgency: Urgency) -> i8 {
     match urgency {
         Urgency::Quiet => -1,
@@ -55,16 +102,8 @@ impl Notifier for PushoverNotifier {
     }
 
     async fn notify(&self, event: Event<'_>) -> anyhow::Result<()> {
-        let (title, message, priority) = Self::message(event);
-        let build = || {
-            self.client.post(PUSHOVER_API).json(&serde_json::json!({
-                "token": self.token,
-                "user": self.user,
-                "message": message,
-                "title": title,
-                "priority": priority,
-            }))
-        };
+        let payload = self.payload(event);
+        let build = || self.client.post(PUSHOVER_API).json(&payload);
         // The user key is a quasi-secret too: it lets anyone message the user.
         send_retrying(
             build,
@@ -109,6 +148,49 @@ mod tests {
             summary: "ok",
         });
         assert_eq!(priority, -1);
+    }
+
+    /// A channel's priority wins over the event's, for every event; its
+    /// sound and emergency settings ride along, and nothing unset does.
+    #[test]
+    fn channel_options_shape_the_payload() {
+        let digest = || Event::Digest {
+            period: "week",
+            summary: "ok",
+        };
+        let plain = PushoverNotifier::new(Client::new(), "t".into(), "u".into());
+        let payload = plain.payload(digest());
+        assert_eq!(payload["priority"], -1);
+        for key in ["sound", "retry", "expire"] {
+            assert!(payload.get(key).is_none(), "{key}");
+        }
+        let emergency = PushoverNotifier::new(Client::new(), "t".into(), "u".into()).with_options(
+            PushoverOptions {
+                priority: Some(2),
+                sound: Some("siren".into()),
+                retry: Some(60),
+                expire: Some(3600),
+            },
+        );
+        let payload = emergency.payload(digest());
+        assert_eq!(payload["priority"], 2);
+        assert_eq!(payload["sound"], "siren");
+        assert_eq!(payload["retry"], 60);
+        assert_eq!(payload["expire"], 3600);
+        let quiet = PushoverNotifier::new(Client::new(), "t".into(), "u".into()).with_options(
+            PushoverOptions {
+                priority: Some(-1),
+                sound: Some("none".into()),
+                ..PushoverOptions::default()
+            },
+        );
+        let payload = quiet.payload(Event::CertChanged {
+            monitor: "API",
+            old_fingerprint: "aa",
+            new_fingerprint: "bb",
+        });
+        assert_eq!(payload["priority"], -1, "the channel's, not the event's 1");
+        assert_eq!(payload["sound"], "none");
     }
 
     #[test]

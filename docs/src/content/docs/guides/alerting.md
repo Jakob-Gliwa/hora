@@ -50,6 +50,14 @@ On Gotify, ntfy and Pushover the notification's title is the event's headline
 ("API is DOWN") and its message the detail, so a phone's notification list
 names the monitor on every line.
 
+A Pushover channel may set its own `priority` (-2 to 2), which then applies
+to every message it sends instead of the one the event's urgency picks, and
+a `sound` (`"none"` is silence). Priority 2 (emergency) repeats until it is
+acknowledged and needs `retry` (seconds between repeats, at least 30) and
+`expire` (how long, at most 10800); both are refused at other priorities.
+Two channels with the same keys and different priorities route quiet and
+loud monitors apart.
+
 Every channel renders the same neutral message (`API is DOWN`,
 `API is slow (812 ms)`, `API recovered`) and only adds its own markup and
 priority, so the wording never drifts between channels. Email subjects read

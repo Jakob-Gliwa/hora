@@ -420,6 +420,9 @@ fn validate_channels(config: &Config) -> anyhow::Result<HashSet<&str>> {
                 channel.name()
             );
         }
+        if matches!(channel, Channel::Pushover { .. }) {
+            validate_pushover(channel.name(), &channel.pushover_options())?;
+        }
         // These channels send credentials over the configured URL (in the URL
         // itself, or - for Matrix - in a header); warn on cleartext http.
         let url = match channel {
@@ -443,6 +446,46 @@ fn validate_channels(config: &Config) -> anyhow::Result<HashSet<&str>> {
         }
     }
     Ok(channel_names)
+}
+
+/// A Pushover channel's own settings, as the API takes them: a priority of
+/// -2 to 2, and `retry`/`expire` exactly for an emergency (2), which
+/// Pushover refuses without them.
+fn validate_pushover(
+    name: &str,
+    options: &hora_notify::pushover::PushoverOptions,
+) -> anyhow::Result<()> {
+    let hora_notify::pushover::PushoverOptions {
+        priority,
+        sound,
+        retry,
+        expire,
+    } = options;
+    let (priority, retry, expire) = (*priority, *retry, *expire);
+    anyhow::ensure!(
+        priority.is_none_or(|priority| (-2..=2).contains(&priority)),
+        "channel {name}: priority must be between -2 and 2"
+    );
+    if priority == Some(2) {
+        anyhow::ensure!(
+            retry.is_some_and(|secs| secs >= 30),
+            "channel {name}: priority 2 needs retry (at least 30 seconds)"
+        );
+        anyhow::ensure!(
+            expire.is_some_and(|secs| (1..=10_800).contains(&secs)),
+            "channel {name}: priority 2 needs expire (1 to 10800 seconds)"
+        );
+    } else {
+        anyhow::ensure!(
+            retry.is_none() && expire.is_none(),
+            "channel {name}: retry and expire only apply to priority 2"
+        );
+    }
+    anyhow::ensure!(
+        sound.as_deref().is_none_or(|sound| !sound.is_empty()),
+        "channel {name}: sound must not be empty (\"none\" is silence)"
+    );
+    Ok(())
 }
 
 /// The `host` labels of the node and of its peers (a monitor's is checked

@@ -3257,3 +3257,28 @@ fn transport_options_belong_to_their_kind() {
     }
     assert!(load(&format!("{MINIMAL}\nping_count = 3")).is_err());
 }
+
+/// A Pushover channel's priority, sound and emergency settings, as the API
+/// takes them.
+#[test]
+fn pushover_channel_options_are_validated() {
+    let channel = "\n[[channels]]\nname = 'pager'\ntype = 'pushover'\n\
+                   token = 'test-token'\nuser = 'test-user'\n";
+    for good in [
+        "",
+        "priority = -1\nsound = 'none'",
+        "priority = 2\nretry = 30\nexpire = 600",
+    ] {
+        assert!(load(&format!("{MINIMAL}{channel}{good}")).is_ok(), "{good}");
+    }
+    for bad in [
+        "priority = 3",
+        "priority = 2",
+        "priority = 2\nretry = 29\nexpire = 600",
+        "priority = 2\nretry = 30\nexpire = 10801",
+        "retry = 60",
+        "sound = ''",
+    ] {
+        assert!(load(&format!("{MINIMAL}{channel}{bad}")).is_err(), "{bad}");
+    }
+}

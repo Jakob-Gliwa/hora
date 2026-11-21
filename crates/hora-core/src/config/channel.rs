@@ -82,10 +82,48 @@ pub enum Channel {
         token: Secret,
         /// Pushover user key (recipient).
         user: Secret,
+        /// Pushover priority (-2 to 2) for every message of this channel,
+        /// instead of one picked by the event; 2 (emergency) needs `retry`
+        /// and `expire`.
+        #[serde(default)]
+        priority: Option<i8>,
+        /// The sound the recipient hears (`"none"` for silence); unset = the
+        /// recipient's own setting.
+        #[serde(default)]
+        sound: Option<String>,
+        /// Priority 2: seconds between Pushover's repeats until the message
+        /// is acknowledged (at least 30).
+        #[serde(default)]
+        retry: Option<u32>,
+        /// Priority 2: how long Pushover keeps repeating, seconds (at most
+        /// 10800).
+        #[serde(default)]
+        expire: Option<u32>,
     },
 }
 
 impl Channel {
+    /// A Pushover channel's own priority, sound and emergency settings
+    /// (none for any other channel).
+    #[must_use]
+    pub fn pushover_options(&self) -> hora_notify::pushover::PushoverOptions {
+        match self {
+            Self::Pushover {
+                priority,
+                sound,
+                retry,
+                expire,
+                ..
+            } => hora_notify::pushover::PushoverOptions {
+                priority: *priority,
+                sound: sound.clone(),
+                retry: *retry,
+                expire: *expire,
+            },
+            _ => hora_notify::pushover::PushoverOptions::default(),
+        }
+    }
+
     /// The routing name a monitor refers to.
     #[must_use]
     pub fn name(&self) -> &str {
