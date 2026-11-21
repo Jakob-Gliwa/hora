@@ -2460,11 +2460,8 @@ mod tests {
             }
         }
         let config = crate::config::parse(&toml).expect("config");
-        // The pool's acquire timeout runs on the tokio clock, which this test
-        // pauses and lets jump ahead whenever every task waits on SQLite's
-        // worker thread: at the default 30 s, a slow machine timed reads out
-        // (read errors, retried a period later). Longer than the simulated
-        // hour, it never fires.
+        // The pool's acquire timeout runs on the tokio clock too: longer
+        // than all the time this test advances, it never fires.
         let store = Store::in_memory_with_acquire_timeout(Duration::from_hours(2)).await;
         for (id, _) in &pushes {
             db::insert_push(&store, id, CheckStatus::Up, None, None)
@@ -2474,8 +2471,18 @@ mod tests {
         let (_config_tx, config_rx) = watch::channel(Arc::new(config));
         let (_shutdown_tx, shutdown_rx) = watch::channel(false);
         let (alerts_tx, _alerts_rx) = mpsc::unbounded_channel();
-        // Opened first: the pool's own timeouts must not run on the paused clock.
+        // The clock moves only when this test advances it. A paused clock
+        // jumps ahead on its own whenever the runtime idles - and it idles
+        // while every task waits on SQLite's worker thread: the tasks' own
+        // timers then ran through hours in a moment, up to the pool's
+        // acquire timeout (PoolTimedOut on a slow machine). A task that is
+        // always runnable keeps it from ever idling.
         tokio::time::pause();
+        let spinner = tokio::spawn(async {
+            loop {
+                tokio::task::yield_now().await;
+            }
+        });
         let tasks: Vec<_> = (0..pushes.len())
             .map(|index| {
                 monitor_task(
@@ -2488,35 +2495,58 @@ mod tests {
                 )
             })
             .collect();
+        // Every task has looked once before the first heartbeat (its phase
+        // is under a minute); after that, one look per heartbeat and none
+        // in between, checked every simulated second.
+        let monitors = u64::try_from(pushes.len()).unwrap();
         let mut heartbeats = 0_u64;
-        for second in 1..=3_600_u64 {
-            tokio::time::sleep(Duration::from_secs(1)).await;
+        for second in 1..=3_700_u64 {
+            // Whatever waited for the one connection gets it before the
+            // clock moves on (the pool serves its waiters in order).
+            store.ping().await.unwrap();
+            tokio::time::advance(Duration::from_secs(1)).await;
             for (id, every) in &pushes {
-                if every.is_some_and(|every| second % every == 0) {
+                if second <= 3_600 && every.is_some_and(|every| second % every == 0) {
                     db::insert_push(&store, id, CheckStatus::Up, None, None)
                         .await
                         .unwrap();
                     heartbeats += 1;
                 }
             }
+            if second == 299 || second % 300 == 0 || second == 3_700 {
+                settle(&store, monitors + heartbeats).await;
+            }
+            assert!(
+                reads(&store) <= monitors + heartbeats,
+                "second {second}: {} reads for {heartbeats} heartbeats",
+                reads(&store)
+            );
         }
-        // Let the last heartbeats be looked at.
-        tokio::time::sleep(Duration::from_secs(1)).await;
         tokio::time::resume();
+        spinner.abort();
         for task in tasks {
             task.abort();
         }
-        let reads = store
-            .heartbeat_reads
-            .load(std::sync::atomic::Ordering::Relaxed);
-        (heartbeats, reads)
+        (heartbeats, reads(&store))
+    }
+
+    /// Wait (in real time, bounded) until the tasks have made `expected`
+    /// reads and those have finished, the clock standing still.
+    async fn settle(store: &Store, expected: u64) {
+        let began = std::time::Instant::now();
+        while reads(store) < expected && began.elapsed() < Duration::from_secs(10) {
+            tokio::task::yield_now().await;
+        }
+        // Queued behind the reads on the one connection.
+        store.ping().await.unwrap();
+        assert_eq!(reads(store), expected);
     }
 
     /// Polling read every push monitor's latest heartbeat every 30 s (the
     /// live `push_poll_secs`) or every minute: 3 000 or 1 500 reads an hour
     /// for 52 heartbeats. Healthy ones are read once at start and once per
     /// heartbeat now (no deadline falls within the hour), whatever the
-    /// machine's speed: the clock is tokio's paused one.
+    /// machine's speed: the clock is tokio's, advanced by the test only.
     #[tokio::test]
     async fn an_hour_of_healthy_push_monitors_reads_only_what_came() {
         for poll in [Some(30), None] {
