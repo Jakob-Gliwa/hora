@@ -145,7 +145,9 @@ async fn last_check_times_seek_each_requested_monitor() {
     insert(&store, "b", 200, 1, None).await;
     insert(&store, "other", 900, 1, None).await;
 
-    let times = last_check_times(&store, &["a", "b", "never"]).await.unwrap();
+    let times = last_check_times(&store, &["a", "b", "never"])
+        .await
+        .unwrap();
     assert_eq!(times.len(), 2);
     assert_eq!(times["a"], 300);
     assert_eq!(times["b"], 200);
