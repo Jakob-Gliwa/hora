@@ -29,6 +29,31 @@ The `heartbeat_url` (healthchecks.io and the like) gets the same pings as an
 empty `POST`, without the status digest a peer reads (monitor count,
 scheduler age): nothing about the node leaves for a third party.
 
+Healthy also means "able to alert": the heartbeat stops while every
+notification channel is failing, while the alert coalescer has stopped, and
+when the config load kept no channel or no monitor of the ones configured.
+
+### The self-check monitor
+
+What the heartbeat cannot see, the built-in monitor **`hora-self`** reports.
+Every minute it looks for a monitor without a check for three of its periods
+(interval or timeout, whichever is longer) plus a minute - push monitors and
+monitors added within that time excepted -, a monitor or peer-watch task the
+supervisor restarted within the last hour, a channel at
+`alerts.channel_fail_threshold` failures in a row, a stopped alert coalescer
+and checks skipped for lack of file descriptors or memory. While anything is
+found it is down with every finding in its message and alerts like any
+monitor; it recovers by itself. Hora alone feeds it: `/api/push/hora-self`
+is refused, and no monitor may take the id.
+
+```toml
+[self_monitor]              # optional, like every key in it
+name = "Hora: self-check"
+group = "Watchdog"
+# notify = ["oncall"]       # default: every channel
+# repeat_alert_secs = 21600
+```
+
 ## Peers: two independent halves
 
 Each `[[peers]]` entry can declare either or both directions:

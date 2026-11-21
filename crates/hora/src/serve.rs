@@ -69,6 +69,7 @@ pub(crate) async fn serve() -> anyhow::Result<()> {
         client.clone(),
         Arc::clone(&handle.notifier),
         Arc::clone(&last_tick),
+        Arc::clone(&handle.self_health),
         shutdown_rx.clone(),
     );
 
@@ -106,6 +107,15 @@ pub(crate) async fn serve() -> anyhow::Result<()> {
     let config_task =
         hora_core::config_status::spawn(store.clone(), handle.config.clone(), shutdown_rx.clone());
 
+    // Hora watching itself: stale monitors, stopped tasks, failing channels.
+    let self_task = hora_core::self_check::spawn(
+        store.clone(),
+        handle.config.clone(),
+        handle.notifier.clone(),
+        Arc::clone(&handle.self_health),
+        shutdown_rx.clone(),
+    );
+
     let prune_task =
         hora_core::maintenance::spawn_pruner(&store, handle.config.clone(), shutdown_rx);
 
@@ -137,6 +147,7 @@ pub(crate) async fn serve() -> anyhow::Result<()> {
             vantage_task,
             updates_task,
             config_task,
+            self_task,
         ],
     );
     serve_until_stopped(
@@ -215,7 +226,10 @@ type ErrorPage = (
 /// path (so `/healthz` and the container health check fail visibly), bound
 /// where the daemon will listen (`HORA_BIND`, else its default).
 async fn serve_config_error(reason: Arc<std::sync::Mutex<String>>) -> Option<ErrorPage> {
-    let bind = std::env::var("HORA_BIND").unwrap_or_else(|_| "127.0.0.1:8787".to_owned());
+    let bind = std::env::var("HORA_BIND")
+        .ok()
+        .filter(|bind| !bind.is_empty())
+        .unwrap_or_else(|| "127.0.0.1:8787".to_owned());
     let listener = match tokio::net::TcpListener::bind(&bind).await {
         Ok(listener) => listener,
         Err(err) => {

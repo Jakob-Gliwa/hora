@@ -20,7 +20,7 @@ documents every option; this page covers the mechanics.
 | `[[incidents]]` | Manual announcements shown as a status page banner |
 | `[[monitors]]` | The monitors themselves |
 | `[health]` / `[[peers]]` | Mutual surveillance ([dead-man's switch](../guides/peers/)) |
-| `[config_monitor]` | Name, group and routes of the built-in configuration monitor (optional) |
+| `[config_monitor]` / `[self_monitor]` | Name, group and routes of the built-in [configuration](#a-faulty-entry-does-not-stop-the-daemon) and [self-check](../guides/peers/#the-self-check-monitor) monitors (optional) |
 
 ## Secrets stay in the environment
 
