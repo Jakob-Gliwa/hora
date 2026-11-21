@@ -38,6 +38,7 @@ pub fn client(proxy: Option<&str>) -> reqwest::Result<Client> {
         Policy::custom(same_origin_redirect),
         None,
         Reuse::Pooled,
+        Certs::Verified,
     )
 }
 
@@ -58,7 +59,23 @@ pub fn client(proxy: Option<&str>) -> reqwest::Result<Client> {
 ///
 /// Returns an error if the proxy URL is invalid or the client cannot be built.
 pub fn probe_client(proxy: Option<&str>) -> reqwest::Result<Client> {
-    build(proxy, Policy::none(), None, Reuse::Fresh)
+    probe_client_tls(proxy, false)
+}
+
+/// [`probe_client`] for a monitor with `ignore_tls`: when `ignore_tls` is
+/// set, any certificate is accepted (expired, self-signed, another name's).
+/// Kept apart from the verifying clients, never shared with them.
+///
+/// # Errors
+///
+/// Returns an error if the proxy URL is invalid or the client cannot be built.
+pub fn probe_client_tls(proxy: Option<&str>, ignore_tls: bool) -> reqwest::Result<Client> {
+    let certs = if ignore_tls {
+        Certs::AcceptAny
+    } else {
+        Certs::Verified
+    };
+    build(proxy, Policy::none(), None, Reuse::Fresh, certs)
 }
 
 /// Like [`probe_client`], but restricted to one address family by binding the
@@ -71,7 +88,21 @@ pub fn probe_client(proxy: Option<&str>) -> reqwest::Result<Client> {
 ///
 /// Returns an error if the client cannot be built.
 pub fn probe_client_family(local: std::net::IpAddr) -> reqwest::Result<Client> {
-    build(None, Policy::none(), Some(local), Reuse::Fresh)
+    build(
+        None,
+        Policy::none(),
+        Some(local),
+        Reuse::Fresh,
+        Certs::Verified,
+    )
+}
+
+/// Whether a client checks the server's certificate.
+#[derive(Clone, Copy)]
+enum Certs {
+    Verified,
+    /// A monitor's explicit `ignore_tls`.
+    AcceptAny,
 }
 
 /// Whether a client keeps idle connections for its next request.
@@ -88,6 +119,7 @@ fn build(
     redirect: Policy,
     local: Option<std::net::IpAddr>,
     reuse: Reuse,
+    certs: Certs,
 ) -> reqwest::Result<Client> {
     let mut builder = Client::builder()
         .user_agent(concat!("hora/", env!("CARGO_PKG_VERSION")))
@@ -96,7 +128,8 @@ fn build(
         // Backstop for requests without a per-request timeout (notifiers); probes
         // override this with the monitor's own timeout.
         .timeout(Duration::from_secs(15))
-        .connect_timeout(Duration::from_secs(10));
+        .connect_timeout(Duration::from_secs(10))
+        .danger_accept_invalid_certs(matches!(certs, Certs::AcceptAny));
     if matches!(reuse, Reuse::Fresh) {
         builder = builder.pool_max_idle_per_host(0);
     }

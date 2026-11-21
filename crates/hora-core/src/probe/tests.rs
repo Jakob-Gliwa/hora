@@ -880,3 +880,51 @@ fn public_reason_collapses_dual_stack_detail() {
         "IPv4 and IPv6 failing"
     );
 }
+
+/// `ignore_tls` takes a client that accepts the fixture's self-signed
+/// certificate, which the verifying one refuses.
+#[tokio::test]
+async fn ignore_tls_accepts_a_certificate_the_verifying_client_refuses() {
+    let port = crate::testing::tls_server().await;
+    let monitor = http_monitor(&format!("https://127.0.0.1:{port}"));
+    let verifying = crate::http::probe_client(None).unwrap();
+    assert!(!http(&verifying, &monitor, spec(&monitor)).await.is_up());
+    let insecure = crate::http::probe_client_tls(None, true).unwrap();
+    let outcome = http(&insecure, &monitor, spec(&monitor)).await;
+    assert!(outcome.is_up(), "{:?}", outcome.error);
+    // The verifying client is no less strict for it.
+    assert!(!http(&verifying, &monitor, spec(&monitor)).await.is_up());
+}
+
+/// Several echo requests of the configured size, a second apart, all
+/// within the one timeout: up with one reply or more. Skipped where this
+/// host may not open an unprivileged ICMP socket; where loopback does not
+/// answer it (macOS), the timeout budget is still what is checked.
+#[tokio::test]
+async fn icmp_sends_the_configured_count_within_the_timeout() {
+    let config = crate::config::parse(
+        "[page]\n[server]\n[[monitors]]\nid='lo'\nname='Lo'\nkind='icmp'\n\
+         target='127.0.0.1'\ninterval_secs=60\ntimeout_secs=2\nping_count=3\npacket_size=56\n",
+    )
+    .unwrap();
+    let monitor = &config.monitors[0];
+    let MonitorKind::Icmp(spec) = &monitor.spec else {
+        panic!("not icmp");
+    };
+    assert_eq!((spec.ping_count, spec.packet_size), (3, 56));
+    let started = std::time::Instant::now();
+    let outcome = super::icmp::icmp(monitor, spec).await;
+    if outcome
+        .error
+        .as_deref()
+        .is_some_and(|error| error.starts_with("icmp socket unavailable"))
+    {
+        return;
+    }
+    let elapsed = started.elapsed();
+    assert!(elapsed < std::time::Duration::from_secs(3), "{elapsed:?}");
+    if outcome.is_up() {
+        // More than one request went out, a second apart.
+        assert!(elapsed >= std::time::Duration::from_secs(1), "{elapsed:?}");
+    }
+}

@@ -61,27 +61,50 @@ pub(super) async fn icmp_family(
     };
 
     let mut pinger = client.pinger(addr, PingIdentifier(0)).await;
-    pinger.timeout(monitor.timeout());
-    match pinger.ping(PingSequence(0), &[0u8; 16]).await {
-        // surge-ping also hands back the ICMP *errors* that quote our request
-        // (destination unreachable, time exceeded...) as a "reply": only an
-        // echo reply means the host answered.
-        Ok((packet, _rtt)) if !is_echo_reply(&packet) => {
-            Outcome::down(FailureKind::Ping, icmp_error(&packet))
+    let payload = vec![0u8; usize::from(spec.packet_size)];
+    // `ping_count` requests a second apart, all within the one timeout: each
+    // waits its share of what is left. One reply is enough, and the latency
+    // is the replies' average; with none, the last failure is the reason.
+    let deadline = tokio::time::Instant::now() + monitor.timeout();
+    let mut replies = 0_u32;
+    let mut total = std::time::Duration::ZERO;
+    let mut failure = Outcome::down(FailureKind::Timeout, "request timed out".to_owned());
+    for sequence in 0..spec.ping_count {
+        let left = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if left.is_zero() {
+            break;
         }
-        Ok((_packet, rtt)) => {
-            let latency = millis(rtt);
-            Outcome::up(
-                over_threshold(latency, monitor.degraded_over_ms),
-                Some(latency),
-                None,
+        pinger.timeout(left / u32::from(spec.ping_count - sequence));
+        match pinger.ping(PingSequence(sequence), &payload).await {
+            // surge-ping also hands back the ICMP *errors* that quote our
+            // request (destination unreachable, time exceeded...) as a
+            // "reply": only an echo reply means the host answered.
+            Ok((packet, _rtt)) if !is_echo_reply(&packet) => {
+                failure = Outcome::down(FailureKind::Ping, icmp_error(&packet));
+            }
+            Ok((_packet, rtt)) => {
+                replies += 1;
+                total += rtt;
+            }
+            Err(SurgeError::Timeout { .. }) => {}
+            Err(err) => failure = Outcome::down(FailureKind::Ping, format!("icmp error: {err}")),
+        }
+        if sequence + 1 < spec.ping_count {
+            tokio::time::sleep_until(
+                (tokio::time::Instant::now() + std::time::Duration::from_secs(1)).min(deadline),
             )
+            .await;
         }
-        Err(SurgeError::Timeout { .. }) => {
-            Outcome::down(FailureKind::Timeout, "request timed out".to_owned())
-        }
-        Err(err) => Outcome::down(FailureKind::Ping, format!("icmp error: {err}")),
     }
+    if replies == 0 {
+        return failure;
+    }
+    let latency = millis(total / replies);
+    Outcome::up(
+        over_threshold(latency, monitor.degraded_over_ms),
+        Some(latency),
+        None,
+    )
 }
 
 /// Whether a packet matched to our request is an echo reply (type 0 over

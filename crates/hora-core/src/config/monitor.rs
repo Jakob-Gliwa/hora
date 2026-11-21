@@ -206,6 +206,8 @@ pub struct HttpSpec {
     pub proxy: Option<String>,
     /// Probe IPv4 and IPv6 separately and require both.
     pub dual_stack: bool,
+    /// Accept any certificate on the requests (`ignore_tls`).
+    pub ignore_tls: bool,
 }
 
 /// `keyword` / `keyword_invert`.
@@ -263,6 +265,10 @@ pub struct IcmpSpec {
     /// A bare host or IP.
     pub target: String,
     pub dual_stack: bool,
+    /// Echo requests per check (1 to 10).
+    pub ping_count: u16,
+    /// Payload bytes per echo request.
+    pub packet_size: u16,
 }
 
 /// A DNS resolution check.
@@ -379,6 +385,7 @@ impl std::fmt::Debug for HttpSpec {
             .field("max_body_kb", &self.max_body_kb)
             .field("proxy", &self.proxy.as_deref().map(redact_url_secrets))
             .field("dual_stack", &self.dual_stack)
+            .field("ignore_tls", &self.ignore_tls)
             // The parsed form of `target`, redacted above.
             .finish_non_exhaustive()
     }
@@ -472,6 +479,13 @@ impl Monitor {
     #[must_use]
     pub fn interval(&self) -> Duration {
         Duration::from_secs(self.interval_secs)
+    }
+
+    /// Whether this monitor's HTTP requests accept any certificate
+    /// (`ignore_tls`): such a monitor gets a probe client of its own kind.
+    #[must_use]
+    pub fn ignore_tls(&self) -> bool {
+        matches!(&self.spec, MonitorKind::Http(spec) if spec.ignore_tls)
     }
 
     /// Whether this monitor probes both address families (default off).

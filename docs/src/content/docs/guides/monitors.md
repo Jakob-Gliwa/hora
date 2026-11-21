@@ -78,6 +78,8 @@ timeout_secs = 10
 # method = "HEAD"           # "GET" (default) or "HEAD"
 # degraded_over_ms = 800    # up but slower than this = degraded (yellow)
 # headers = { Authorization = "Bearer ${TOKEN}" }
+# ignore_tls = true         # accept any certificate (a LAN device's own);
+#                           # check_cert = false stops the expiry watch too
 # proxy = "socks5://127.0.0.1:9050"
 ```
 
@@ -175,6 +177,11 @@ IPv6. If the socket is unavailable the monitor reports down with a clear
 reason naming the sysctl to fix (`net.ipv4.ping_group_range`); it works
 with every capability dropped, see
 [ICMP monitors in Docker and Kubernetes](../../getting-started/#icmp-monitors-in-docker-and-kubernetes).
+
+`ping_count` (1 to 10, default 1) sends that many echo requests a second
+apart, all within `timeout_secs`; one reply is enough, and the latency is
+the replies' average. `packet_size` (1 to 4096, default 16) sets the
+payload bytes of each.
 
 ### `dns`
 

@@ -3227,3 +3227,33 @@ fn retry_reminder_and_poll_cadences_are_validated() {
     assert!(load(&format!("{push}push_poll_secs=93601")).is_err());
     assert!(load(&format!("{push}push_poll_secs=0")).is_err());
 }
+
+/// `ignore_tls` on http, `ping_count`/`packet_size` on icmp, within bounds.
+#[test]
+fn transport_options_belong_to_their_kind() {
+    let config = load(&format!("{MINIMAL}\nignore_tls = true")).unwrap();
+    assert!(config.monitors[0].ignore_tls());
+    assert!(!parse(MINIMAL).monitors[0].ignore_tls());
+    assert!(load(&format!("{MINIMAL}\nignore_tls = true\ndual_stack = true")).is_err());
+    let ping = "[page]\n[server]\n[[monitors]]\nid='ping'\nname='Ping'\nkind='icmp'\n\
+                target='192.0.2.1'\ninterval_secs=60\n";
+    let config = load(&format!("{ping}ping_count=3\npacket_size=56")).unwrap();
+    let MonitorKind::Icmp(spec) = &config.monitors[0].spec else {
+        panic!("not icmp");
+    };
+    assert_eq!((spec.ping_count, spec.packet_size), (3, 56));
+    let MonitorKind::Icmp(spec) = &load(ping).unwrap().monitors[0].spec else {
+        panic!("not icmp");
+    };
+    assert_eq!((spec.ping_count, spec.packet_size), (1, 16));
+    for bad in [
+        "ping_count=0",
+        "ping_count=11",
+        "packet_size=0",
+        "packet_size=4097",
+        "ignore_tls=true",
+    ] {
+        assert!(load(&format!("{ping}{bad}")).is_err(), "{bad}");
+    }
+    assert!(load(&format!("{MINIMAL}\nping_count = 3")).is_err());
+}

@@ -161,6 +161,21 @@ pub(crate) struct RawMonitor {
     /// monitors, and for tcp monitors with `starttls` set.
     #[serde(default)]
     pub(crate) check_cert: Option<bool>,
+    /// HTTP monitor: accept any certificate - expired, self-signed, for
+    /// another name - on its requests. The explicit exception for a device
+    /// on the LAN that serves its own; the certificate watch is separate
+    /// (`check_cert = false` turns that off too).
+    #[serde(default)]
+    pub(crate) ignore_tls: Option<bool>,
+    /// ICMP monitor: echo requests per check (default 1, at most 10), a
+    /// second apart within the timeout. One reply is enough; the latency is
+    /// the replies' average.
+    #[serde(default)]
+    pub(crate) ping_count: Option<u16>,
+    /// ICMP monitor: payload bytes per echo request (default 16, at most
+    /// 4096).
+    #[serde(default)]
+    pub(crate) packet_size: Option<u16>,
     /// TCP monitor: negotiate `STARTTLS` (`"smtp"` or `"imap"`) before the
     /// certificate check, so the expiry/pin machinery covers mail servers on
     /// 587/143 - the certificate nobody ever looks at until it expires. The
@@ -288,6 +303,9 @@ impl Default for RawMonitor {
             schedule: None,
             grace_secs: None,
             check_cert: None,
+            ignore_tls: None,
+            ping_count: None,
+            packet_size: None,
             starttls: None,
             ehlo_name: None,
             retention_days: None,

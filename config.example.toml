@@ -310,6 +310,9 @@ depends_on = ["api"]
 #                          # ("burning error budget at 14.4x - exhausted in ~6 h").
 # slo_window_days = 30     # optional; the SLO window (default 30 days)
 # check_cert = false      # optional; override TLS expiry checking
+# ignore_tls = true       # optional, http; accept any certificate on the probe's
+#                         # requests (a LAN device's self-signed one). Not with
+#                         # dual_stack; the expiry watch is check_cert's business
 # retention_days = 30     # optional; override how long this monitor's history is kept
 # headers = { Accept = "text/html", Authorization = "Bearer ${TOKEN}" }  # optional
 # notify = ["alerts-discord"]   # optional; route alerts to specific channels
@@ -394,6 +397,10 @@ interval_secs = 30
 timeout_secs = 5
 group = "infra"
 # degraded_over_ms = 200         # optional; flag slow round-trips as degraded
+# ping_count = 3                 # optional; echo requests per check, a second
+#                                # apart within the timeout (1-10, default 1);
+#                                # one reply is up, latency = their average
+# packet_size = 56               # optional; payload bytes (1-4096, default 16)
 
 # Heartbeat / push monitor: down if no ping arrives within `interval_secs`.
 # The job calls: curl -fsS -X POST -H "X-Push-Token: ${BACKUP_TOKEN}" \

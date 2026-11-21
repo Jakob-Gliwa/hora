@@ -115,6 +115,7 @@ fn spec_of(raw: &mut RawMonitor) -> anyhow::Result<MonitorKind> {
             max_body_kb: raw.max_body_kb,
             proxy: raw.proxy.take(),
             dual_stack,
+            ignore_tls: raw.ignore_tls.unwrap_or(false),
         }),
         Kind::Tcp => MonitorKind::Tcp(TcpSpec {
             target,
@@ -128,7 +129,12 @@ fn spec_of(raw: &mut RawMonitor) -> anyhow::Result<MonitorKind> {
             },
             dual_stack,
         }),
-        Kind::Icmp => MonitorKind::Icmp(IcmpSpec { target, dual_stack }),
+        Kind::Icmp => MonitorKind::Icmp(IcmpSpec {
+            target,
+            dual_stack,
+            ping_count: raw.ping_count.unwrap_or(1),
+            packet_size: raw.packet_size.unwrap_or(DEFAULT_PACKET_SIZE),
+        }),
         Kind::Dns => MonitorKind::Dns(DnsSpec {
             target,
             record: match &raw.dns_record {
@@ -163,6 +169,9 @@ fn spec_of(raw: &mut RawMonitor) -> anyhow::Result<MonitorKind> {
         }
     })
 }
+
+/// The payload of an echo request by default: 16 bytes.
+const DEFAULT_PACKET_SIZE: u16 = 16;
 
 /// How late a scheduled push may arrive by default: 30 minutes.
 const DEFAULT_PUSH_GRACE_SECS: u64 = 1800;
@@ -293,6 +302,7 @@ fn validate_monitor_io(monitor: &RawMonitor) -> anyhow::Result<()> {
         monitor.id
     );
     validate_alert_cadence(monitor)?;
+    validate_transport_options(monitor)?;
     validate_http_request(monitor)?;
     // Catch header typos / CR-LF injection at load rather than at send time.
     for (name, value) in &monitor.headers {
@@ -365,6 +375,45 @@ fn validate_alert_cadence(monitor: &RawMonitor) -> anyhow::Result<()> {
             monitor.id
         );
     }
+    Ok(())
+}
+
+/// The options of one kind's transport: `ignore_tls` for HTTP (not through
+/// the shared per-family clients of a dual-stack check), the echo count and
+/// size for ICMP. New keys: on another kind they are refused, not ignored.
+fn validate_transport_options(monitor: &RawMonitor) -> anyhow::Result<()> {
+    if monitor.ignore_tls.is_some() {
+        anyhow::ensure!(
+            monitor.kind == Kind::Http,
+            "monitor {}: ignore_tls requires an http monitor",
+            monitor.id
+        );
+        anyhow::ensure!(
+            !(monitor.ignore_tls == Some(true) && monitor.dual_stack == Some(true)),
+            "monitor {}: ignore_tls cannot be combined with dual_stack",
+            monitor.id
+        );
+    }
+    anyhow::ensure!(
+        monitor.kind == Kind::Icmp
+            || (monitor.ping_count.is_none() && monitor.packet_size.is_none()),
+        "monitor {}: ping_count/packet_size require an icmp monitor",
+        monitor.id
+    );
+    anyhow::ensure!(
+        monitor
+            .ping_count
+            .is_none_or(|count| (1..=10).contains(&count)),
+        "monitor {}: ping_count must be between 1 and 10",
+        monitor.id
+    );
+    anyhow::ensure!(
+        monitor
+            .packet_size
+            .is_none_or(|size| (1..=4096).contains(&size)),
+        "monitor {}: packet_size must be between 1 and 4096 bytes",
+        monitor.id
+    );
     Ok(())
 }
 
