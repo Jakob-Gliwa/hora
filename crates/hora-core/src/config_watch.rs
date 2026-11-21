@@ -332,13 +332,13 @@ impl Reloader {
 /// Start everything that can ask for a reload of `config_path` - SIGHUP, the
 /// file notifications, the periodic re-read - and return where the supervisor
 /// waits for the outcome. All of it stops when the [`Reloader`] is dropped.
-/// What the mount table says against live reload is logged here, once.
-pub(crate) fn start(config_path: &Path) -> Reloader {
+/// What the mount table says against live reload (`caveats`, read by the
+/// caller, which reports them on) is logged here, once.
+pub(crate) fn start(config_path: &Path, caveats: &[Caveat]) -> Reloader {
     let (tx, rx) = mpsc::channel(8);
     spawn_sighup(tx.clone());
 
-    let caveats = caveats(config_path);
-    for caveat in &caveats {
+    for caveat in caveats {
         warn!("{caveat}");
     }
     let how = Follow {

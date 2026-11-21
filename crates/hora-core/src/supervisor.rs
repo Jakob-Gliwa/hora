@@ -27,7 +27,7 @@
 //! heartbeat reads `[health]` on every cycle.
 
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::atomic::AtomicU64;
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
@@ -161,13 +161,18 @@ pub struct Handle {
 /// reload loop, and return the handles every component reads.
 #[must_use]
 pub fn start(
-    initial: Config,
+    mut initial: Config,
     config_path: PathBuf,
     store: Store,
     client: Client,
     last_tick: Arc<AtomicU64>,
     shutdown: watch::Receiver<bool>,
 ) -> Handle {
+    // Where live reload cannot work as documented, the configuration monitor
+    // is down from the first config on, not only once something reloads.
+    let caveats = config_watch::caveats(&config_path);
+    let standing: Vec<config::ConfigIssue> = caveats.iter().map(caveat_issue).collect();
+    initial.issues.extend(standing.iter().cloned());
     let notifier = notifications::shared(&initial, &client);
     let (tx, rx) = watch::channel(Arc::new(initial));
     let (alerts_tx, alerts_rx) = mpsc::unbounded_channel();
@@ -190,7 +195,12 @@ pub fn start(
     };
     let supervisor_rx = rx.clone();
     let task = tokio::spawn(async move {
-        supervise(tx, supervisor_rx, config_path, deps, coalescer, shutdown).await;
+        let reload = Reload {
+            path: config_path,
+            caveats,
+            standing,
+        };
+        supervise(tx, supervisor_rx, reload, deps, coalescer, shutdown).await;
         // The connections close on the same shutdown signal.
         let _ = mqtt_task.await;
     });
@@ -201,10 +211,19 @@ pub fn start(
     }
 }
 
+/// The config file and what stands against reloading it.
+struct Reload {
+    path: PathBuf,
+    /// What the mount table says against live reload, read once at start.
+    caveats: Vec<config_watch::Caveat>,
+    /// The issues those caveats are, added to every config put in force.
+    standing: Vec<config::ConfigIssue>,
+}
+
 async fn supervise(
     tx: watch::Sender<Arc<Config>>,
     rx: watch::Receiver<Arc<Config>>,
-    config_path: PathBuf,
+    reload: Reload,
     deps: Deps,
     coalescer: JoinHandle<()>,
     mut shutdown: watch::Receiver<bool>,
@@ -217,7 +236,7 @@ async fn supervise(
     // Everything that can ask for a reload, debounced and reduced to "the file
     // now holds a text that was not seen before"; dropped (and so stopped) when
     // this function returns.
-    let mut reloads = config_watch::start(&config_path);
+    let mut reloads = config_watch::start(&reload.path, &reload.caveats);
     let mut liveness = tokio::time::interval(LIVENESS_CHECK);
     liveness.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let mut coalescer_dead_logged = false;
@@ -247,8 +266,7 @@ async fn supervise(
             break;
         };
 
-        let Some(config) = apply_reload(&raw, &config_path, &tx, &deps.notifier, &deps.client)
-        else {
+        let Some(config) = apply_reload(&raw, &reload, &tx, &deps.notifier, &deps.client) else {
             continue;
         };
         log_issues(&config);
@@ -286,13 +304,14 @@ async fn supervise(
 /// leaves disabled) applies, with its warning.
 fn apply_reload(
     raw: &str,
-    config_path: &Path,
+    reload: &Reload,
     tx: &watch::Sender<Arc<Config>>,
     notifier: &Notifiers,
     client: &Client,
 ) -> Option<Arc<Config>> {
-    match config::parse_lenient_at(raw, config_path) {
-        Ok(config) => {
+    match config::parse_lenient_at(raw, &reload.path) {
+        Ok(mut config) => {
+            config.issues.extend(reload.standing.iter().cloned());
             let config = Arc::new(config);
             let health = notifier.load().health();
             notifier.store(Arc::new(notifications::build(
@@ -322,6 +341,12 @@ fn apply_reload(
             None
         }
     }
+}
+
+/// A reason live reload works less well than documented, as an issue of
+/// the configuration: the configuration monitor is down while it holds.
+fn caveat_issue(caveat: &config_watch::Caveat) -> config::ConfigIssue {
+    config::ConfigIssue::new("live reload", caveat.to_string())
 }
 
 /// The issue a config file that cannot be loaded at all stands under.
@@ -507,6 +532,14 @@ mod tests {
         assert!(release.contains("panic = \"abort\""), "{release}");
     }
 
+    fn reload_of(caveats: Vec<config_watch::Caveat>) -> Reload {
+        Reload {
+            path: PathBuf::from("config.toml"),
+            standing: caveats.iter().map(caveat_issue).collect(),
+            caveats,
+        }
+    }
+
     const RELOAD_BEFORE: &str = "[page]\n[server]\n[[channels]]\nname = \"ops\"\n\
          type = \"discord\"\nwebhook_url = \"https://discord.example/hook\"\n";
 
@@ -517,7 +550,7 @@ mod tests {
     /// and clears both.
     #[test]
     fn a_failed_reload_keeps_the_config_and_the_channels() {
-        let path = Path::new("config.toml");
+        let path = &reload_of(Vec::new());
         let client = Client::new();
         let initial = Arc::new(config::parse_lenient(RELOAD_BEFORE).unwrap());
         let notifier = notifications::shared(&initial, &client);
@@ -564,7 +597,7 @@ mod tests {
     /// keeps running, and the rest applies.
     #[test]
     fn a_monitor_edited_into_an_invalid_state_is_not_kept() {
-        let path = Path::new("config.toml");
+        let path = &reload_of(Vec::new());
         let client = Client::new();
         let monitors = "[[monitors]]\nid = \"a\"\nname = \"A\"\ntarget = \"https://a.example\"\n\
              interval_secs = 60\n[[monitors]]\nid = \"b\"\nname = \"B\"\n\
@@ -594,7 +627,7 @@ mod tests {
     /// other keeps delivering, and both facts are warned about by name.
     #[test]
     fn a_reload_with_an_unset_variable_applies_with_its_warnings() {
-        let path = Path::new("config.toml");
+        let path = &reload_of(Vec::new());
         let client = Client::new();
         let initial = Arc::new(config::parse_lenient(RELOAD_BEFORE).unwrap());
         let notifier = notifications::shared(&initial, &client);
@@ -620,6 +653,42 @@ mod tests {
                 "channel phone: token is empty, the channel is disabled until it is set",
             ]
         );
+    }
+
+    /// A config mounted so that live reload cannot work as documented keeps
+    /// the configuration monitor down across every reload, next to whatever
+    /// else the load says.
+    #[test]
+    fn a_live_reload_caveat_is_an_issue_of_every_config() {
+        let reload = reload_of(vec![config_watch::Caveat::SingleFileMount {
+            file: PathBuf::from("/etc/hora/config.toml"),
+        }]);
+        let client = Client::new();
+        let initial = Arc::new(config::parse_lenient(RELOAD_BEFORE).unwrap());
+        let notifier = notifications::shared(&initial, &client);
+        let (tx, _rx) = watch::channel(initial);
+
+        let applied = apply_reload(RELOAD_BEFORE, &reload, &tx, &notifier, &client).unwrap();
+        assert_eq!(applied.issues.len(), 1, "{:?}", applied.issues);
+        assert_eq!(applied.issues[0].item, "live reload");
+        assert!(
+            applied.issues[0]
+                .reason
+                .contains("bind-mounted as a single file"),
+            "{:?}",
+            applied.issues
+        );
+        let (status, message) = crate::config_status::state(&applied);
+        assert_eq!(status, crate::status::CheckStatus::Down);
+        assert!(message.contains("live reload:"), "{message}");
+
+        let faulty = format!(
+            "{RELOAD_BEFORE}[[monitors]]\nid = \"bad\"\nname = \"B\"\n\
+             target = \"https://e.com\"\ninterval_secs = 0\n"
+        );
+        let applied = apply_reload(&faulty, &reload, &tx, &notifier, &client).unwrap();
+        let items: Vec<_> = applied.issues.iter().map(|i| i.item.as_str()).collect();
+        assert_eq!(items, ["monitor bad", "live reload"]);
     }
 
     #[test]

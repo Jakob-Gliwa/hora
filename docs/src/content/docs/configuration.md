@@ -132,7 +132,10 @@ Only an edit made in place still arrives.
 Hora says so instead of silently not reloading: on Linux the daemon logs one
 warning at startup when the config is a single-file mount or sits on a
 network filesystem, `hora check` prints the same line among its warnings,
-and [`hora doctor`](../reference/cli/#hora-doctor) reports it as `reload`.
+[`hora doctor`](../reference/cli/#hora-doctor) reports it as `reload`, and
+the [configuration monitor](#a-faulty-entry-does-not-stop-the-daemon) is
+down with a `live reload` issue for as long as the mount stays that way, so
+it alerts instead of edits silently never arriving.
 
 On reload, unchanged monitors keep running untouched; only new, removed or
 changed ones are started or stopped, and the notification channels are
