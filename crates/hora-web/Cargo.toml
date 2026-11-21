@@ -12,7 +12,7 @@ anyhow.workspace = true
 arc-swap.workspace = true
 askama.workspace = true
 axum.workspace = true
-badgelib = "0.5.2"
+badgelib = "0.5.4"
 chrono.workspace = true
 futures-util.workspace = true
 hora-core.workspace = true
@@ -36,4 +36,4 @@ tokio = { workspace = true, features = ["macros", "rt"] }
 toml = { workspace = true }
 tower = { version = "0.5.3", features = ["util"] }
 # Decodes gzipped responses in the compression test (already in the tree via tower-http).
-flate2 = "1.1.10"
+flate2 = "1.1.11"
