@@ -1,6 +1,7 @@
 version: 2
-# scripts/automate-updates.py merges what passes its policy (compatible
-# Cargo.lock updates, base image digests); everything else waits for review.
+# scripts/automate-updates.py merges what passes its policy (crates.io
+# upgrades, incompatible ones included; base image digests) once CI is green;
+# everything else (workflows, image tags) waits for review.
 updates:
   - package-ecosystem: cargo
     directory: /
