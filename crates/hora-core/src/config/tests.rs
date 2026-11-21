@@ -3315,9 +3315,27 @@ fn fork_sections_load() {
         "[server]\n[config_monitor]\nname = 'Config'\n[self_monitor]\nname = 'Self'\ngroup = 'Watchdog'",
     );
     let (loaded, warnings) = captured_warnings(|| load(&builtin));
-    loaded.unwrap();
-    assert_eq!(warnings.len(), 2, "{warnings:?}");
-    assert!(warnings[0].contains("[config_monitor]"), "{warnings:?}");
+    let config = loaded.unwrap();
+    assert_eq!(warnings, Vec::<String>::new());
+    assert_eq!(
+        config.config_monitor.unwrap().name.as_deref(),
+        Some("Config")
+    );
+    assert_eq!(
+        config.self_monitor.unwrap().group.as_deref(),
+        Some("Watchdog")
+    );
+    for bad in [
+        "[config_monitor]
+nmae = 'typo'",
+        "[self_monitor]
+notify = ['nobody']",
+        "[self_monitor]
+repeat_alert_secs = 99999999",
+    ] {
+        let toml = MINIMAL.replace("[server]", &format!("[server]\n{bad}"));
+        assert!(load(&toml).is_err(), "{bad}");
+    }
 }
 
 #[test]

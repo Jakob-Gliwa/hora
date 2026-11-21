@@ -617,3 +617,39 @@ fn push_paths_are_logged_without_their_last_segment() {
     );
     assert_eq!(super::super::logged_path("/api/summary"), "/api/summary");
 }
+
+/// The built-in monitors are fed by Hora alone: a push to one is refused like
+/// a wrong token, with or without a token, whatever the method.
+#[tokio::test]
+async fn the_built_in_monitors_cannot_be_pushed_from_outside() {
+    // Loaded leniently, as the daemon does, so the built-in monitors exist.
+    let config = Arc::new(hora_core::config::parse_lenient("[page]\n[server]\n").unwrap());
+    for id in [
+        hora_core::config::CONFIG_MONITOR_ID,
+        hora_core::config::SELF_MONITOR_ID,
+    ] {
+        assert!(config.find_monitor(id).is_some(), "{id}");
+    }
+    let store = hora_core::db::Store::in_memory().await;
+    let client = hora_core::http::client(None).unwrap();
+    let notifier = hora_core::notifications::shared(&config, &client);
+    let (_tx, rx) = watch::channel(config);
+    let app = router(AppState::new(
+        store.clone(),
+        rx,
+        Arc::new(AtomicU64::new(fresh_tick())),
+        notifier,
+    ));
+    for id in ["hora-config", "hora-self"] {
+        for request in [
+            push(&format!("/api/push/{id}?status=up")),
+            push_with(&format!("/api/push/{id}"), "x-push-token", ""),
+            get(&format!("/api/push/{id}")),
+        ] {
+            let res = app.clone().oneshot(request).await.unwrap();
+            assert_eq!(res.status(), StatusCode::UNAUTHORIZED, "{id}");
+        }
+        let recorded = hora_core::db::recent_checks(&store, id, 10).await.unwrap();
+        assert!(recorded.is_empty(), "{id}");
+    }
+}

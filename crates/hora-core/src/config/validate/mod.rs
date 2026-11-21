@@ -65,7 +65,7 @@ fn is_loopback_url(raw: &str) -> bool {
 /// `expect_every_secs`): 30 days. Nothing sensible is slower, and a typo'd
 /// huge value would overflow `Instant` arithmetic in the tick timers - a panic
 /// (which aborts the daemon in a release build) instead of a load error.
-const MAX_PERIOD_SECS: u64 = 30 * 24 * 3600;
+pub(super) const MAX_PERIOD_SECS: u64 = 30 * 24 * 3600;
 
 /// A period in seconds must be positive and at most [`MAX_PERIOD_SECS`].
 fn validate_period(label: &str, secs: u64) -> anyhow::Result<()> {
@@ -100,7 +100,7 @@ pub(super) fn validate_host_label(label: &str, host: Option<&str>) -> anyhow::Re
 
 /// Ids that appear in URLs (`/api/badge/{id}`, `/api/push/{id}`) must stay
 /// URL-safe.
-fn is_url_safe_id(id: &str) -> bool {
+pub(super) fn is_url_safe_id(id: &str) -> bool {
     id.chars()
         .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
 }
@@ -235,6 +235,7 @@ pub(super) fn validate(config: &Config) -> anyhow::Result<()> {
         config.alerts.notify_unconfirmed.as_deref(),
         &channel_names,
     )?;
+    validate_builtins(config, &channel_names)?;
     Ok(())
 }
 
@@ -290,7 +291,7 @@ fn validate_maintenance(config: &Config) -> anyhow::Result<()> {
 }
 
 /// What this build reads but does not act on yet: the database sizing is
-/// checked for sense; the fork's built-in monitors are warned about.
+/// checked for sense.
 fn validate_reserved(config: &Config) -> anyhow::Result<()> {
     if let Some(database) = &config.server.database {
         anyhow::ensure!(
@@ -306,12 +307,30 @@ fn validate_reserved(config: &Config) -> anyhow::Result<()> {
             "server.database.max_connections must be between 1 and 64"
         );
     }
-    for (section, set) in [
-        ("config_monitor", config.config_monitor.is_some()),
-        ("self_monitor", config.self_monitor.is_some()),
+    Ok(())
+}
+
+/// The built-in monitors' ids are theirs; `[config_monitor]` and
+/// `[self_monitor]` route to configured channels and remind in bounds.
+fn validate_builtins(config: &Config, channel_names: &HashSet<&str>) -> anyhow::Result<()> {
+    if let Some(monitor) = config
+        .monitors
+        .iter()
+        .find(|monitor| super::is_builtin_monitor(&monitor.id))
+    {
+        anyhow::bail!(
+            "monitor {}: the id is reserved for a built-in monitor",
+            monitor.id
+        );
+    }
+    for (section, builtin) in [
+        ("config_monitor", &config.config_monitor),
+        ("self_monitor", &config.self_monitor),
     ] {
-        if set {
-            tracing::warn!("[{section}] is not supported by this build yet: ignored");
+        let Some(builtin) = builtin else { continue };
+        validate_routes(section, builtin.notify.as_deref(), channel_names)?;
+        if let Some(secs) = builtin.repeat_alert_secs.filter(|secs| *secs > 0) {
+            validate_period(&format!("{section}.repeat_alert_secs"), secs)?;
         }
     }
     Ok(())

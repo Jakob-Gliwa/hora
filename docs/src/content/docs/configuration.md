@@ -20,6 +20,7 @@ documents every option; this page covers the mechanics.
 | `[[incidents]]` | Manual announcements shown as a status page banner |
 | `[[monitors]]` | The monitors themselves |
 | `[health]` / `[[peers]]` | Mutual surveillance ([dead-man's switch](../guides/peers/)) |
+| `[config_monitor]` | Name, group and routes of the built-in configuration monitor (optional) |
 
 ## Secrets stay in the environment
 
@@ -194,6 +195,53 @@ channel disabled by an empty secret are among them. Validation is strict: invert
 `depends_on` graphs, private monitors without a viewer token, short or empty
 tokens and malformed cron schedules are all rejected at load, not discovered
 at 3 a.m.
+
+### A faulty entry does not stop the daemon
+
+`hora check` names every faulty entry. The daemon itself loads leniently:
+each monitor, channel, MQTT broker and maintenance window is checked on its
+own, a faulty one is left out with an `ERROR` line naming it and the reason,
+and everything else starts - ten monitors with one typo start nine. What the
+removal leaves dangling is fixed rather than failed:
+
+| Problem | Result |
+| --- | --- |
+| Monitor invalid (type error, unknown key, bad value, duplicate id) | Not loaded; of duplicates the first one is |
+| Channel invalid | Not loaded; routes to it are removed (one issue per channel) |
+| MQTT broker invalid | Not loaded, and its MQTT monitors with it |
+| Maintenance window invalid | Not loaded |
+| `depends_on` names a monitor that is not loaded, or forms a cycle | That dependency is ignored |
+| `server.group_tokens` group without a loaded monitor | Token ignored |
+| `[digest]` invalid, logo unreadable | Digest not sent, no logo shown |
+
+A live reload follows the same rules: an entry edited into an invalid state
+stops until it is fixed. An older version of an entry you changed is never
+kept running.
+
+The built-in monitor **`hora-config`** is down while anything was left out,
+with every issue in its message, and alerts like any monitor (at the first
+failure). It recovers with the first load without issues. Hora alone feeds
+it: `/api/push/hora-config` is refused, and no monitor may take the id.
+
+```toml
+[config_monitor]            # optional, like every key in it
+name = "Hora: configuration"
+group = "Watchdog"
+# notify = ["oncall"]       # default: every channel
+# repeat_alert_secs = 21600
+```
+
+What has no partial form:
+
+- **The file cannot be read, is not valid TOML, or a global section
+  (`[server]`, `[alerts]`, `[health]`, `[[peers]]`, ...) is invalid.** At
+  startup Hora does not exit (a container would restart it in a loop): it
+  answers every request with `503` and the reason, and reads the file again
+  every 5 s until it loads. On a live reload the monitors and channels keep
+  running as loaded before, and `hora-config` says the file cannot be loaded.
+- **No channel or no monitor could be loaded.** Hora cannot alert anybody
+  itself, so it withholds its external heartbeat (`[health].heartbeat_url`,
+  and the peers') and the dead-man service raises the alarm.
 
 ### Bounds
 

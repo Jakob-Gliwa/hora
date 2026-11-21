@@ -61,6 +61,11 @@ pub(crate) async fn push(
     // an authorized peer's is, bounded, for the maintenance it announces.
     body: axum::body::Body,
 ) -> Result<Response, AppError> {
+    // The built-in monitors are fed by the daemon alone: no outside push may
+    // turn one green (the same answer as an unknown id).
+    if hora_core::config::is_builtin_monitor(&id) {
+        return Err(AppError::Unauthorized("invalid push token"));
+    }
     let config = state.config.borrow().clone();
     // A Kuma push URL carries the monitor's token where the id goes: the
     // path itself authorizes, for the monitors that opted in (validation
