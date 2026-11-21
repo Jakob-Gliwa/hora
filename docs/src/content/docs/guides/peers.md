@@ -25,6 +25,9 @@ grace_secs = 180     # startup grace before a never-seen peer is alerted
 The node POSTs to each peer's `ping_url` every `interval_secs` - but **only
 while it is locally healthy** (its scheduler is ticking and its database is
 writable). A hung process stops pinging, and the receiver notices.
+The `heartbeat_url` (healthchecks.io and the like) gets the same pings as an
+empty `POST`, without the status digest a peer reads (monitor count,
+scheduler age): nothing about the node leaves for a third party.
 
 ## Peers: two independent halves
 

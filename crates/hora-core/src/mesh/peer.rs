@@ -221,8 +221,9 @@ pub fn spawn_heartbeat(
                 Ok(maintenance) => announced = HeartbeatBody { maintenance },
                 Err(err) => warn!("cannot read the planned maintenance windows: {err:#}"),
             }
-            // The peers are told what is planned; the extra dead-man target
-            // is not a Hora and gets the bare ping it always got.
+            // The peers are told what is planned, and the digest; the extra
+            // dead-man target is not a Hora and gets a bare ping: nothing
+            // about this node leaves for a third party.
             let body = (!announced.maintenance.is_empty()).then_some(&announced);
             let targets = snapshot
                 .peers
@@ -232,6 +233,7 @@ pub fn spawn_heartbeat(
                         (
                             url.as_ref(),
                             peer.ping_token.as_ref().map(AsRef::as_ref),
+                            Some(digest.as_str()),
                             body,
                         )
                     })
@@ -240,14 +242,13 @@ pub fn spawn_heartbeat(
                     health
                         .heartbeat_url
                         .as_ref()
-                        .map(|url| (url.as_ref(), None, None)),
+                        .map(|url| (url.as_ref(), None, None, None)),
                 );
             // Concurrently, under one deadline: sequential 10 s timeouts would
             // let a single dead receiver push every other heartbeat late.
-            let round = join_all(
-                targets
-                    .map(|(url, token, body)| send_heartbeat(&client, url, token, &digest, body)),
-            );
+            let round = join_all(targets.map(|(url, token, digest, body)| {
+                send_heartbeat(&client, url, token, digest, body)
+            }));
             if tokio::time::timeout(HEARTBEAT_ROUND_DEADLINE, round)
                 .await
                 .is_err()
@@ -259,7 +260,8 @@ pub fn spawn_heartbeat(
 }
 
 /// Fire one heartbeat: `POST {url}?status=up&msg={digest}` with the token (if any)
-/// in the `X-Push-Token` header, so it stays out of the receiver's access logs.
+/// in the `X-Push-Token` header, so it stays out of the receiver's access logs;
+/// without a digest (the external `heartbeat_url`), an empty `POST {url}`.
 /// Fire-and-forget: a failure is logged (without the URL, which may carry
 /// credentials) and the next tick tries again.
 ///
@@ -271,13 +273,13 @@ async fn send_heartbeat(
     client: &Client,
     url: &str,
     token: Option<&str>,
-    digest: &str,
+    digest: Option<&str>,
     body: Option<&HeartbeatBody>,
 ) {
-    let mut request = client
-        .post(url)
-        .query(&[("status", "up"), ("msg", digest)])
-        .timeout(HEARTBEAT_TIMEOUT);
+    let mut request = client.post(url).timeout(HEARTBEAT_TIMEOUT);
+    if let Some(digest) = digest {
+        request = request.query(&[("status", "up"), ("msg", digest)]);
+    }
     if let Some(body) = body {
         request = request.json(body);
     }
@@ -836,7 +838,7 @@ mod tests {
         let client = crate::http::client(None).unwrap();
 
         // Nothing planned: no body at all (the sinks only record JSON).
-        send_heartbeat(&client, &peer_hook, Some("token"), "ok", None).await;
+        send_heartbeat(&client, &peer_hook, Some("token"), Some("ok"), None).await;
         assert!(peer_posts.lock().unwrap().is_empty());
 
         let now = jiff::Timestamp::now().as_second();
@@ -886,5 +888,62 @@ mod tests {
         assert_eq!(body.maintenance[0].host.as_deref(), Some("frank"));
         // The external dead-man target is not told.
         assert!(other_posts.lock().unwrap().is_empty());
+    }
+
+    /// The external dead-man target gets an empty POST - no digest, no
+    /// token - while a peer keeps the status, the digest and its token.
+    #[tokio::test]
+    async fn the_external_heartbeat_tells_nothing_about_the_node() {
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let receiver = tokio::spawn(async move {
+            let mut heads = Vec::new();
+            for _ in 0..2 {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut head = Vec::new();
+                let mut buffer = [0u8; 1024];
+                while !head.windows(4).any(|bytes| bytes == b"\r\n\r\n") {
+                    let read = socket.read(&mut buffer).await.unwrap();
+                    assert!(read > 0 && head.len() < 8192);
+                    head.extend_from_slice(&buffer[..read]);
+                }
+                socket
+                    .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                    .await
+                    .unwrap();
+                heads.push(String::from_utf8(head).unwrap().to_ascii_lowercase());
+            }
+            heads
+        });
+        let client = Client::builder().no_proxy().build().unwrap();
+        let external = format!("http://{address}/external");
+        let peer = format!("http://{address}/peer");
+        send_heartbeat(&client, &external, None, None, None).await;
+        send_heartbeat(
+            &client,
+            &peer,
+            Some("a-long-enough-ping-token"),
+            Some("ok mon=3 tick=1s"),
+            None,
+        )
+        .await;
+        let heads = tokio::time::timeout(Duration::from_secs(5), receiver)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            heads[0].starts_with("post /external http/1.1\r\n"),
+            "{}",
+            heads[0]
+        );
+        assert!(!heads[0].contains("x-push-token"), "{}", heads[0]);
+        assert!(
+            heads[1].starts_with("post /peer?status=up&msg=ok+mon%3d3+tick%3d1s http/1.1\r\n"),
+            "{}",
+            heads[1]
+        );
+        assert!(heads[1].contains("x-push-token: a-long-enough-ping-token\r\n"));
     }
 }
