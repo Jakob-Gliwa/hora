@@ -323,8 +323,9 @@ pub struct PushSpec {
     pub schedule: Option<PushSchedule>,
     /// Also accepted on Uptime Kuma's URL, `/api/push/<push_token>`.
     pub kuma_push: bool,
-    /// How often the heartbeats are looked at; unset = every
-    /// `interval_secs`, at least every minute.
+    /// How often the heartbeats of a monitor short of healthy are looked
+    /// at; unset = every `interval_secs`, at least every minute. A healthy
+    /// one is looked at on its heartbeats and its deadline.
     pub poll_secs: Option<u64>,
 }
 

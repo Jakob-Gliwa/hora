@@ -356,13 +356,19 @@ Optional query parameters: `?status=up|down|degraded`, `msg=...` (recorded
 with the heartbeat), `ping=<ms>` (round-trip latency). An unknown `status`
 or a negative `ping` is refused with a 400, so a typo never reads as up.
 
-**A heartbeat that does not come is down at once.** Hora looks at a push
-monitor at least every minute; once the last heartbeat is older than
-`interval_secs` (or a scheduled run is later than `grace_secs`), the
-monitor is down and alerted, without waiting for `fail_threshold` (the
+**A heartbeat that does not come is down at once.** Hora looks at a
+healthy push monitor when a heartbeat comes and when its deadline passes;
+once the last heartbeat is older than `interval_secs` (or a scheduled run
+is later than `grace_secs`), the monitor is down and alerted, without waiting for `fail_threshold` (the
 global one or the monitor's own): the
 interval or the grace is the tolerance. Size them for the job, not for the
 threshold.
+
+A monitor that is not healthy - down, degraded, recovered while muted - is
+looked at again at least every minute (`push_poll_secs` sets the period),
+so reminders, the end of a maintenance window and the threshold work as
+for any check. A heartbeat is looked at no sooner than one such period
+after the previous look: a burst of pushes counts once.
 
 **The job's own verdict drives alerting.** A heartbeat that says
 `status=down` counts as a failure on the next tick, with the job's `msg` as
