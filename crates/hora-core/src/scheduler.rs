@@ -2460,7 +2460,12 @@ mod tests {
             }
         }
         let config = crate::config::parse(&toml).expect("config");
-        let store = Store::in_memory().await;
+        // The pool's acquire timeout runs on the tokio clock, which this test
+        // pauses and lets jump ahead whenever every task waits on SQLite's
+        // worker thread: at the default 30 s, a slow machine timed reads out
+        // (read errors, retried a period later). Longer than the simulated
+        // hour, it never fires.
+        let store = Store::in_memory_with_acquire_timeout(Duration::from_hours(2)).await;
         for (id, _) in &pushes {
             db::insert_push(&store, id, CheckStatus::Up, None, None)
                 .await
@@ -2495,6 +2500,8 @@ mod tests {
                 }
             }
         }
+        // Let the last heartbeats be looked at.
+        tokio::time::sleep(Duration::from_secs(1)).await;
         tokio::time::resume();
         for task in tasks {
             task.abort();
@@ -2507,7 +2514,9 @@ mod tests {
 
     /// Polling read every push monitor's latest heartbeat every 30 s (the
     /// live `push_poll_secs`) or every minute: 3 000 or 1 500 reads an hour
-    /// for 52 heartbeats. Healthy ones are read on their heartbeats now.
+    /// for 52 heartbeats. Healthy ones are read once at start and once per
+    /// heartbeat now (no deadline falls within the hour), whatever the
+    /// machine's speed: the clock is tokio's paused one.
     #[tokio::test]
     async fn an_hour_of_healthy_push_monitors_reads_only_what_came() {
         for poll in [Some(30), None] {
@@ -2517,8 +2526,15 @@ mod tests {
                 "push_poll_secs {poll:?}: {pushed} pushes, {reads} heartbeat reads, {:.1?}",
                 began.elapsed()
             );
-            // One look at start per monitor, one per heartbeat.
-            assert!(reads <= pushed + 25, "{reads} reads for {pushed} pushes");
+            let monitors = 25;
+            assert_eq!(
+                reads,
+                monitors + pushed,
+                "{reads} reads for {pushed} pushes"
+            );
+            // Never more than polling: a look per period, plus the first.
+            let period = poll.unwrap_or(60);
+            assert!(reads <= monitors * (3_600 / period + 1));
         }
     }
 

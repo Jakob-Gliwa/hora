@@ -209,11 +209,24 @@ impl Store {
     /// When the in-memory database cannot be opened or migrated.
     #[cfg(any(test, feature = "test-support"))]
     pub async fn in_memory() -> Self {
+        Self::in_memory_with_acquire_timeout(Duration::from_secs(30)).await
+    }
+
+    /// [`Store::in_memory`], waiting up to `timeout` for its one connection
+    /// (sqlx's default is 30 s) - for a test on a paused tokio clock, where
+    /// that wait runs on the clock the test jumps ahead.
+    ///
+    /// # Panics
+    ///
+    /// When the in-memory database cannot be opened or migrated.
+    #[cfg(any(test, feature = "test-support"))]
+    pub async fn in_memory_with_acquire_timeout(timeout: Duration) -> Self {
         let options = SqliteConnectOptions::new()
             .filename(":memory:")
             .create_if_missing(true);
         let pool = SqlitePoolOptions::new()
             .max_connections(1)
+            .acquire_timeout(timeout)
             .connect_with(options)
             .await
             .expect("open in-memory database");
