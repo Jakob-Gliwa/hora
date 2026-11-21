@@ -71,6 +71,88 @@ class PolicyTests(unittest.TestCase):
         self.new["package"].append(copy.deepcopy(self.new["package"][1]))
         self.assertFalse(updates.compatible_update(self.old, self.new))
 
+    def test_incompatible_upgrades_with_new_registry_crates_are_allowed(self):
+        self.new["package"][1].update(version="0.5.2", checksum="new")
+        self.new["package"].append({"name": "xxhash-rust", "version": "0.8.21",
+                                    "source": updates.REGISTRY, "checksum": "x"})
+        self.assertTrue(updates.upgrade_only(self.old, self.new))
+        self.assertFalse(updates.compatible_update(self.old, self.new))
+
+    def test_upgrade_only_rejects_downgrades_prereleases_sources_and_members(self):
+        for mutate in [
+            lambda d: d["package"][1].update(version="0.3.9"),
+            lambda d: d["package"][1].update(version="0.5.0-rc.1"),
+            lambda d: d["package"][1].update(source="git+https://example.com/library"),
+            lambda d: d["package"].append({"name": "new", "version": "1.0.0",
+                                           "source": "git+https://example.com/new"}),
+            lambda d: d["package"][0].update(version="0.1.1"),
+            lambda d: d["package"][1].update(version="0.3.10"),
+        ]:
+            value = copy.deepcopy(self.new)
+            mutate(value)
+            with self.subTest(value=value):
+                self.assertFalse(updates.upgrade_only(self.old, value))
+        self.assertFalse(updates.upgrade_only(self.old, self.old))
+
+    def test_dependency_lists_may_name_the_new_versions(self):
+        self.old["package"][0]["dependencies"] = ["library 0.3.10", "nix 0.31.3"]
+        self.new["package"][0]["dependencies"] = ["library 0.5.2", "nix 0.32.0"]
+        self.new["package"][1]["version"] = "0.5.2"
+        self.assertTrue(updates.upgrade_only(self.old, self.new))
+        # Everything but the dependency list stays fixed.
+        self.new["package"][0]["checksum"] = "planted"
+        self.assertFalse(updates.upgrade_only(self.old, self.new))
+
+    def test_upgrade_only_handles_crates_with_several_versions(self):
+        extra = {"name": "library", "version": "1.0.0", "source": updates.REGISTRY, "checksum": "a"}
+        self.old["package"].append(extra)
+        self.new["package"].append(extra)
+        self.assertTrue(updates.upgrade_only(self.old, self.new))
+        # Dropping the 1.x line while 0.3 moves up stays an upgrade; going below it does not.
+        self.new["package"].pop()
+        self.assertTrue(updates.upgrade_only(self.old, self.new))
+
+    def test_manifests_may_change_only_version_requirements(self):
+        before = {"workspace": {"dependencies": {"notify": "8.2.0"}},
+                  "dependencies": {"nix": {"version": "0.31", "features": ["fs"]},
+                                   "local": {"path": "../local"}},
+                  "target": {"cfg(unix)": {"dev-dependencies": {"libc": "0.2"}}},
+                  "package": {"name": "hora-core", "version": "0.11.4"}}
+        after = copy.deepcopy(before)
+        after["workspace"]["dependencies"]["notify"] = "9.0.0"
+        after["dependencies"]["nix"]["version"] = "0.32"
+        after["target"]["cfg(unix)"]["dev-dependencies"]["libc"] = "^0.3"
+        self.assertTrue(updates.version_requirements_only(before, after))
+        for mutate in [
+            lambda d: d["dependencies"]["nix"].update(features=["fs", "process"]),
+            lambda d: d["dependencies"]["local"].update(path="../other"),
+            lambda d: d["dependencies"].update(extra="1.0"),
+            lambda d: d["package"].update(version="0.12.0"),
+            lambda d: d["dependencies"]["nix"].update(version="*"),
+            lambda d: d["dependencies"]["nix"].update(version="0.33.0-beta.1"),
+            lambda d: d["workspace"]["dependencies"].update(notify={"git": "https://example.com"}),
+        ]:
+            value = copy.deepcopy(after)
+            mutate(value)
+            with self.subTest(value=value):
+                self.assertFalse(updates.version_requirements_only(before, value))
+
+    def test_requirement_bumps_are_routed_to_manifest_and_lockfile_policies(self):
+        cases = [
+            (["Cargo.lock", "crates/hora-core/Cargo.toml"], True, True, True),
+            (["Cargo.lock", "Cargo.toml"], True, False, False),
+            (["Cargo.lock", "crates/hora-core/Cargo.toml"], False, True, False),
+            (["crates/hora-core/Cargo.toml"], True, True, None),
+            (["Cargo.lock", "crates/hora-core/Cargo.toml", "src/lib.rs"], True, True, None),
+        ]
+        for files, manifests_ok, lock_ok, expected in cases:
+            with self.subTest(files=files), \
+                 patch.object(updates, "manifest", return_value={}), \
+                 patch.object(updates, "lockfile", return_value={}), \
+                 patch.object(updates, "version_requirements_only", return_value=manifests_ok), \
+                 patch.object(updates, "upgrade_only", return_value=lock_ok):
+                self.assertEqual(updates.unattended(files, "base", "head"), expected)
+
     def test_only_base_image_digests_may_change(self):
         image = "FROM alpine:3.24@sha256:" + "a" * 64 + " AS runtime"
         before = f"# syntax=docker/dockerfile:1\n{image}\nRUN true\n"
