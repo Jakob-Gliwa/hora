@@ -201,6 +201,20 @@ monitors = ["database"]          # empty = all monitors
 `monitors` takes monitor ids and the `listen_id` of watched
 [peers](../peers/), so a planned reboot of another node stays quiet too.
 
+A window that comes back - nightly auto-updates, a weekly backup - takes a
+`cron` instead of `start` and `end`, read on the wall clock of `timezone`
+(an IANA name, UTC by default, daylight saving time included), and lasts
+`duration_secs` (up to a week) from each run:
+
+```toml
+[[maintenance]]
+title = "Container auto-updates"
+cron = "0 13 * * 0"              # Sundays 13:00 ...
+timezone = "Europe/Berlin"       # ... Berlin time, summer and winter
+duration_secs = 900
+monitors = ["app", "db"]
+```
+
 ### Planned at runtime
 
 The same window can be planned while the daemon runs, with no config edit

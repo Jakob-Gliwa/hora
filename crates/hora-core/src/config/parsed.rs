@@ -90,6 +90,13 @@ impl<T> Compiled<T> {
     }
 }
 
+impl<T> Compiled<T> {
+    /// A value parsed elsewhere, with the text it came from.
+    pub(crate) fn from_parsed(raw: String, value: T) -> Self {
+        Self { raw, value }
+    }
+}
+
 impl<T: ParseField> Compiled<T> {
     /// Parse `raw`, for values built outside a config file (tests, the CLI).
     ///
