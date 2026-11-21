@@ -202,6 +202,12 @@ default_retention_days = 90
 # minutes; once they no longer all see it up, the real down alert goes out.
 # notify_unconfirmed = ["ntfy-low"]   # a quiet channel instead
 # notify_unconfirmed = []             # record only, notify nobody
+#
+# Reminders: while a confirmed outage lasts, send its down alert again every
+# this many seconds (0, the default, sends none). A monitor may set its own,
+# 0 included. Muted (maintenance, silence), folded into a root cause's alert,
+# or local-only: no reminder. A restart keeps the clock.
+# repeat_alert_secs = 21600
 
 # --- Weekly digest ----------------------------------------------------------
 # A recap of the last 7 days through the notification channels: "99.97 %
@@ -294,6 +300,9 @@ depends_on = ["api"]
 #                         # number_regex. No other method: Hora sends no body.
 # fail_threshold = 1      # optional; consecutive failed checks before THIS monitor
 #                         # is down, instead of [alerts] fail_threshold. Any kind.
+# retry_interval_secs = 20  # optional; next check this soon after a failure that
+#                         # has not confirmed the outage yet (probed kinds only)
+# repeat_alert_secs = 3600  # optional; reminder cadence, instead of [alerts]'s
 # degraded_over_ms = 800  # optional; up but slower than this = degraded (yellow)
 # slo_latency_ms = 500    # optional; the 24 h p95 is flagged met/breached against this
 # slo_uptime = 99.9        # optional; availability SLO (%). Shows the error budget
@@ -410,6 +419,8 @@ allow_unauthenticated = true     # accepts heartbeats from anyone: example only
 # schedule = "0 3 * * *"     # five-field cron, UTC (not local time: DST moves a
 #                            # local crontab by an hour); replaces the fixed-gap rule
 # grace_secs = 1800          # how late a scheduled ping may be (default 30 min)
+# push_poll_secs = 30        # how often heartbeats are looked at (default: every
+#                            # interval_secs, at least every minute)
 # kuma_push = true           # also accept Uptime Kuma's URL for producers set
 #                            # up for Kuma: GET/POST /api/push/<push_token>
 #                            # ?status=up|down&msg=...&ping=... (needs push_token)

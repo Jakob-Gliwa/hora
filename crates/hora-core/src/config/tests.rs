@@ -2513,7 +2513,8 @@ fn the_example_config_round_trips_into_typed_monitors() {
         backup.spec,
         MonitorKind::Push(PushSpec {
             schedule: None,
-            kuma_push: false
+            kuma_push: false,
+            poll_secs: None
         })
     );
 }
@@ -3188,4 +3189,41 @@ fn kuma_push_requires_unique_url_safe_tokens_that_are_no_id() {
         ))
         .is_err()
     );
+}
+
+/// The cadences around an outage: re-check, reminders (the monitor's own,
+/// else the global one; 0 = off), and a push monitor's polling.
+#[test]
+fn retry_reminder_and_poll_cadences_are_validated() {
+    let config = load(&format!(
+        "{MINIMAL}\nretry_interval_secs = 10\nrepeat_alert_secs = 3600"
+    ))
+    .unwrap();
+    assert_eq!(config.monitors[0].retry_interval_secs, Some(10));
+    assert_eq!(
+        config.monitors[0].repeat_alert_secs(&config.alerts),
+        Some(3600)
+    );
+    let config = load(&format!("{MINIMAL}\nrepeat_alert_secs = 0")).unwrap();
+    assert_eq!(config.monitors[0].repeat_alert_secs(&config.alerts), None);
+    let global = MINIMAL.replace("[server]", "[server]\n[alerts]\nrepeat_alert_secs = 600");
+    let config = load(&global).unwrap();
+    assert_eq!(
+        config.monitors[0].repeat_alert_secs(&config.alerts),
+        Some(600)
+    );
+    assert_eq!(parse(MINIMAL).alerts.repeat_alert_secs, 0);
+    for bad in [
+        "retry_interval_secs = 0",
+        "retry_interval_secs = 99999999",
+        "repeat_alert_secs = 99999999",
+        "push_poll_secs = 30",
+    ] {
+        assert!(load(&format!("{MINIMAL}\n{bad}")).is_err(), "{bad}");
+    }
+    let push = "[page]\n[server]\n[[monitors]]\nid='job'\nname='Job'\nkind='push'\n\
+                interval_secs=93600\npush_token='0123456789abcdef'\n";
+    assert!(load(&format!("{push}push_poll_secs=30")).is_ok());
+    assert!(load(&format!("{push}push_poll_secs=93601")).is_err());
+    assert!(load(&format!("{push}push_poll_secs=0")).is_err());
 }

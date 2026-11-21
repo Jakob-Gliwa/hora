@@ -40,6 +40,21 @@ pub(crate) struct RawMonitor {
     /// failure is already worth a page, more for one that is known to flap.
     #[serde(default)]
     pub(crate) fail_threshold: Option<u32>,
+    /// Seconds to the next check after a failure that has not confirmed the
+    /// outage yet (fewer than `fail_threshold` in a row), instead of
+    /// `interval_secs`: confirm a real outage sooner without probing a
+    /// healthy service more often. Probed monitors only; a push monitor is
+    /// judged from its heartbeats at its own cadence.
+    #[serde(default)]
+    pub(crate) retry_interval_secs: Option<u64>,
+    /// Remind of a confirmed outage every this many seconds while it lasts,
+    /// instead of `[alerts] repeat_alert_secs`; 0 turns reminders off.
+    #[serde(default)]
+    pub(crate) repeat_alert_secs: Option<u64>,
+    /// Push monitor: how often its heartbeats are looked at, instead of
+    /// every `interval_secs` up to a minute.
+    #[serde(default)]
+    pub(crate) push_poll_secs: Option<u64>,
     #[serde(default)]
     pub(crate) degraded_over_ms: Option<i64>,
     /// Latency SLO objective in ms: the 24h p95 is flagged met/breached against it.
@@ -247,6 +262,9 @@ impl Default for RawMonitor {
             expected_status: None,
             method: None,
             fail_threshold: None,
+            retry_interval_secs: None,
+            repeat_alert_secs: None,
+            push_poll_secs: None,
             degraded_over_ms: None,
             slo_latency_ms: None,
             slo_uptime: None,

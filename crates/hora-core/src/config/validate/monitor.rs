@@ -50,6 +50,8 @@ pub(crate) fn monitor_from_raw(mut raw: RawMonitor) -> anyhow::Result<Monitor> {
         slo_window_days: raw.slo_window_days,
         probe_retries: raw.probe_retries,
         fail_threshold: raw.fail_threshold,
+        retry_interval_secs: raw.retry_interval_secs,
+        repeat_alert_secs: raw.repeat_alert_secs,
         notify: raw.notify,
         check_cert: raw.check_cert,
         retention_days: raw.retention_days,
@@ -150,6 +152,7 @@ fn spec_of(raw: &mut RawMonitor) -> anyhow::Result<MonitorKind> {
                 None => None,
             },
             kuma_push: raw.kuma_push.unwrap_or(false),
+            poll_secs: raw.push_poll_secs,
         }),
         Kind::Exec => {
             let mut command = std::mem::take(&mut raw.command).into_iter();
@@ -289,6 +292,7 @@ fn validate_monitor_io(monitor: &RawMonitor) -> anyhow::Result<()> {
         "monitor {}: fail_threshold must be at least 1",
         monitor.id
     );
+    validate_alert_cadence(monitor)?;
     validate_http_request(monitor)?;
     // Catch header typos / CR-LF injection at load rather than at send time.
     for (name, value) in &monitor.headers {
@@ -333,6 +337,34 @@ fn validate_monitor_io(monitor: &RawMonitor) -> anyhow::Result<()> {
         validate_dual_stack(monitor)?;
     }
     validate_schedule_and_slo(monitor)?;
+    Ok(())
+}
+
+/// The cadences around an outage: the re-check of an unconfirmed failure,
+/// the reminder of a confirmed one (0 = none), and how often a push
+/// monitor's heartbeats are looked at - which only a push monitor has, and
+/// never less often than its deadline.
+fn validate_alert_cadence(monitor: &RawMonitor) -> anyhow::Result<()> {
+    let label = |field: &str| format!("monitor {} {field}", monitor.id);
+    if let Some(secs) = monitor.retry_interval_secs {
+        super::validate_period(&label("retry_interval_secs"), secs)?;
+    }
+    if let Some(secs) = monitor.repeat_alert_secs.filter(|secs| *secs > 0) {
+        super::validate_period(&label("repeat_alert_secs"), secs)?;
+    }
+    if let Some(secs) = monitor.push_poll_secs {
+        anyhow::ensure!(
+            monitor.kind == Kind::Push,
+            "monitor {}: push_poll_secs requires a push monitor",
+            monitor.id
+        );
+        super::validate_period(&label("push_poll_secs"), secs)?;
+        anyhow::ensure!(
+            secs <= monitor.interval_secs,
+            "monitor {}: push_poll_secs must not exceed interval_secs",
+            monitor.id
+        );
+    }
     Ok(())
 }
 

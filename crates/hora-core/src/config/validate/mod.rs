@@ -144,6 +144,9 @@ pub(super) fn validate(config: &Config) -> anyhow::Result<()> {
         );
     }
     let channel_names = validate_channels(config)?;
+    if config.alerts.repeat_alert_secs > 0 {
+        validate_period("alerts.repeat_alert_secs", config.alerts.repeat_alert_secs)?;
+    }
 
     for window in &config.maintenance {
         anyhow::ensure!(

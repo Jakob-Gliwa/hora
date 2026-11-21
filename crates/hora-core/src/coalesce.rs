@@ -40,6 +40,9 @@ use crate::notifications::Notifiers;
 #[derive(Debug)]
 pub enum AlertMsg {
     Down(DownAlert),
+    /// A confirmed outage still lasts: the down again, sent where the down
+    /// itself went (see `Coalescer::can_remind`).
+    Reminder(DownAlert),
     Recovered {
         id: String,
         name: String,
@@ -264,6 +267,16 @@ impl Coalescer {
     /// Forget folded downs of monitors no longer configured: their recovery
     /// will never come, and a monitor re-added under the same id later must
     /// not have its first real recovery swallowed.
+    /// Whether a reminder of `id`'s outage may go out: not while its down
+    /// waits in the grouping window, not for a down folded into its root
+    /// cause's (the cause's reminder speaks for it), and not for a
+    /// local-only down the peers never confirmed.
+    fn can_remind(&self, id: &str) -> bool {
+        !self.suppressed.contains(id)
+            && !self.pending.iter().any(|pending| pending.alert.id == id)
+            && self.quiet.get(id).is_none_or(|quiet| quiet.confirmed)
+    }
+
     /// Seed the routing of a local-only down announced before a restart.
     fn resume_local_only(&mut self, id: String, confirmed: bool) {
         self.quiet.insert(id, Quiet { confirmed });
@@ -336,6 +349,11 @@ pub fn spawn(
                         Some(AlertMsg::Down(alert)) => {
                             let window = config.borrow().alerts.group_window_secs;
                             if let Some(alert) = state.on_down(alert, now, window) {
+                                send_down(&mut lanes, &config, alert).await;
+                            }
+                        }
+                        Some(AlertMsg::Reminder(alert)) => {
+                            if state.can_remind(&alert.id) {
                                 send_down(&mut lanes, &config, alert).await;
                             }
                         }
@@ -678,6 +696,23 @@ mod tests {
         // Recoveries go back to whoever received the down.
         assert_eq!(c.on_recovered("db", 200), Recipients::Quiet);
         assert_eq!(c.on_recovered("web", 200), Recipients::Usual);
+    }
+
+    #[test]
+    fn reminders_go_only_where_the_down_went() {
+        let mut c = Coalescer::default();
+        assert!(c.on_down(down("db", &[]), 0, 30).is_some());
+        assert!(c.can_remind("db"));
+        // Still waiting in the window, then folded into its cause.
+        assert!(c.on_down(down("web", &["db"]), 0, 30).is_none());
+        assert!(!c.can_remind("web"));
+        assert!(c.flush(31).is_empty());
+        assert!(!c.can_remind("web"));
+        // A local-only down, until the peers confirm it.
+        assert!(c.on_down(local("api", &[]), 0, 30).is_some());
+        assert!(!c.can_remind("api"));
+        c.resume_local_only("api".to_owned(), true);
+        assert!(c.can_remind("api"));
     }
 
     #[test]

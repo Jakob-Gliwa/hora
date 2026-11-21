@@ -41,6 +41,25 @@ heartbeat on a push monitor never waits for any threshold (see
 [push](#push-heartbeat)). [`hora tune`](../../reference/cli/#hora-tune) recommends a
 value per monitor from its recorded history.
 
+`retry_interval_secs` checks a failing monitor again sooner while its
+failures have not reached the threshold yet - `interval_secs = 300` with
+`retry_interval_secs = 30` and `fail_threshold = 3` confirms a real outage in
+about a minute, and still checks a healthy service every five. Push
+monitors take no retry (their heartbeats are judged at their own cadence,
+see `push_poll_secs`).
+
+## Reminders of a lasting outage
+
+`repeat_alert_secs` (in `[alerts]`, or on a monitor, which wins; 0 = none,
+the default) sends the down alert again every so many seconds while a
+confirmed outage lasts, to the same channels. A muted monitor (maintenance,
+silence) is not reminded of; the first tick after the mute ends sends one
+reminder, never a backlog. A down folded into its root cause's alert, and a
+local-only down the peers did not confirm, are not reminded of either. The
+time of the last one is kept in the database, so a restart neither repeats
+nor forgets it. This is separate from the re-sending of a down that no
+channel took.
+
 ## Kinds
 
 ### `http` (default)

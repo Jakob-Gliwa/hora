@@ -76,6 +76,11 @@ pub(crate) struct AlertState {
     /// looked at again every [`REANNOUNCE_SECS`], and the down sent again
     /// while no channel has taken it.
     announce_checked: Option<i64>,
+    /// The current down was last sent - confirmed, sent again, or reminded
+    /// of - at this time (unix seconds): the clock of the reminders
+    /// (`repeat_alert_secs`). Kept in the database too, so a restart
+    /// neither repeats a reminder nor forgets one is due.
+    reminded: Option<i64>,
 }
 
 /// How often the peers are asked again about a local-only down.
@@ -121,6 +126,7 @@ impl AlertState {
         self.consecutive_down = 0;
         self.local_only_asked = None;
         self.announce_checked = None;
+        self.reminded = None;
         self.rearmed = self.level == AlertLevel::Down;
     }
 
@@ -141,7 +147,21 @@ impl AlertState {
         self.local_only_asked = None;
         self.rearmed = false;
         self.announce_checked = None;
+        self.reminded = None;
         self.level != AlertLevel::Healthy
+    }
+
+    /// Whether the confirmed outage is due a reminder, `every` seconds after
+    /// it was last sent. A local-only down is not reminded of: the peers
+    /// are asked again instead, and it becomes a real down if they agree.
+    /// However long the reminder was held back (muted, a restart), one is
+    /// due, never a burst.
+    fn remind_due(&self, now: i64, every: u64) -> bool {
+        self.level == AlertLevel::Down
+            && self.local_only_asked.is_none()
+            && self.reminded.is_some_and(|last| {
+                now.saturating_sub(last) >= i64::try_from(every).unwrap_or(i64::MAX)
+            })
     }
 
     /// Whether the down's delivery is due another look.
@@ -231,11 +251,21 @@ pub fn spawn_monitor(
 /// at least every minute: ticking once per interval let a nightly job's
 /// missed heartbeat go unnoticed for up to a whole interval after its
 /// deadline, and then wait `fail_threshold` more of them - days.
+///
+/// A push monitor's `push_poll_secs` sets it instead.
 fn evaluation_interval(monitor: &Monitor) -> std::time::Duration {
-    match monitor.spec {
-        MonitorKind::Push(_) => monitor.interval().min(PUSH_EVALUATION_MAX),
+    match &monitor.spec {
+        MonitorKind::Push(push) => push.poll_secs.map_or_else(
+            || monitor.interval().min(PUSH_EVALUATION_MAX),
+            std::time::Duration::from_secs,
+        ),
         _ => monitor.interval(),
     }
+}
+
+/// The database key holding when a monitor's current down was last sent.
+fn reminded_key(monitor_id: &str) -> String {
+    format!("reminded:{monitor_id}")
 }
 
 /// The longest a push monitor goes between two looks at its heartbeats.
@@ -322,6 +352,16 @@ async fn run(
             Some(incident_id) => {
                 let mut state = AlertState::resumed_down(alert_settings(&config, &monitor.id).0);
                 resume_local_only(&store, &alerts, &monitor.id, incident_id, &mut state).await;
+                // Its reminders go on from the last one sent; one unknown
+                // (none recorded, a read error) counts from now.
+                state.reminded = Some(
+                    db::meta_get(&store, &reminded_key(&monitor.id))
+                        .await
+                        .ok()
+                        .flatten()
+                        .and_then(|at| at.parse().ok())
+                        .unwrap_or_else(|| jiff::Timestamp::now().as_second()),
+                );
                 state
             }
             None => AlertState::default(),
@@ -377,11 +417,26 @@ async fn run(
         }
 
         let (threshold, alert_on_degraded) = alert_settings(&config, &monitor.id);
+        let reminded = state.reminded;
+        let remind_every = monitor.repeat_alert_secs(&config.borrow().alerts);
         // A maintenance window (the config's, one planned through the API,
         // one a peer announced) or an ad-hoc silence (`hora silence`, POST
         // /api/silence): both read fresh each tick, so they apply at once and
         // stop muting the moment they end.
         let muted = muted(&store, &config, &monitor.id).await;
+        // A failure short of confirming the outage is checked again sooner
+        // (`retry_interval_secs`), unless muted - nothing would be confirmed.
+        // A push monitor has no probe to repeat: its heartbeats are judged
+        // at its own cadence.
+        if let Some(retry) = monitor.retry_interval_secs
+            && heartbeat.is_none()
+            && !muted
+            && !outcome.is_up()
+            && state.level != AlertLevel::Down
+            && state.consecutive_down.saturating_add(1) < threshold
+        {
+            ticker.reset_after(std::time::Duration::from_secs(retry));
+        }
         // A heartbeat that did not come is confirmed as it is: its interval
         // (or its schedule's grace) was the tolerance. The anti-flap
         // threshold is for checks that ran and failed, and still applies to
@@ -443,6 +498,7 @@ async fn run(
                 let now = jiff::Timestamp::now().as_second();
                 state.local_only_asked = local_only.then_some(now);
                 state.announce_checked = Some(now);
+                state.reminded = Some(now);
             } else if state.reannounce_due(jiff::Timestamp::now().as_second(), reannounce_secs) {
                 // Delivered since: nothing more to watch. Still not: every
                 // channel failed, or dropped it - said again, on the same
@@ -463,6 +519,7 @@ async fn run(
                         .await;
                         let now = jiff::Timestamp::now().as_second();
                         state.local_only_asked = local_only.then_some(now);
+                        state.reminded = Some(now);
                         Some(now)
                     }
                     _ => None,
@@ -480,6 +537,13 @@ async fn run(
                 )
                 .await;
                 state.local_only_asked = still_local.then(|| jiff::Timestamp::now().as_second());
+            } else if let Some(every) = remind_every
+                && state.remind_due(jiff::Timestamp::now().as_second(), every)
+            {
+                info!(monitor = %monitor.id, "still down: reminding");
+                let snapshot = config.borrow().clone();
+                remind_down(&snapshot, &store, &alerts, &monitor, &outcome).await;
+                state.reminded = Some(jiff::Timestamp::now().as_second());
             }
         } else if outcome.is_degraded() && alert_on_degraded {
             // Up but slow: same anti-flap threshold as down, separate state.
@@ -507,7 +571,58 @@ async fn run(
         // Written back right after the side effect, with no `.await` in
         // between: see [`AlertCell`].
         alert_state.set(state);
+        if state.reminded != reminded {
+            save_reminded(&store, &monitor.id, state.reminded).await;
+        }
     }
+}
+
+/// Keep when the current down was last sent (or forget it once the outage
+/// is over), for a restart to go on from. A write error costs at most one
+/// reminder early or late: logged, never fatal.
+async fn save_reminded(store: &Store, monitor_id: &str, reminded: Option<i64>) {
+    let key = reminded_key(monitor_id);
+    let saved = match reminded {
+        Some(at) => db::meta_set(store, &key, &at.to_string()).await,
+        None => db::meta_delete(store, &key).await,
+    };
+    if let Err(err) = saved {
+        warn!(monitor = %monitor_id, "cannot keep the reminder time: {err:#}");
+    }
+}
+
+/// Remind of a confirmed outage: the down alert again, with its topology
+/// context read afresh, through the coalescer - which sends it only where
+/// the down itself went (not for a down folded into its root cause's).
+async fn remind_down(
+    config: &Config,
+    store: &Store,
+    alerts: &mpsc::UnboundedSender<AlertMsg>,
+    monitor: &Monitor,
+    outcome: &Outcome,
+) {
+    let (cause, impacted) = down_context(config, store, monitor).await;
+    send_alert(
+        alerts,
+        &monitor.id,
+        AlertMsg::Reminder(DownAlert {
+            id: monitor.id.clone(),
+            name: monitor.name.clone(),
+            error: outcome.error.clone(),
+            upstreams: topology::transitive_upstreams(&config.monitors, &monitor.id)
+                .into_iter()
+                .map(str::to_owned)
+                .collect(),
+            cause_name: cause.map(|(_, name)| name),
+            impacted,
+            notify: monitor.notify.clone(),
+            vantage: None,
+            event: None,
+            local_only: false,
+            // The incident's announcement is the first down's business.
+            incident: None,
+        }),
+    );
 }
 
 /// A monitor just confirmed down: resolve the topology context, open (or
@@ -1062,6 +1177,50 @@ mod tests {
         assert_eq!(every("web"), std::time::Duration::from_mins(10));
     }
 
+    /// `push_poll_secs` sets how often a push monitor is looked at.
+    #[test]
+    fn push_poll_secs_sets_the_evaluation_cadence() {
+        let config = crate::config::parse(
+            r#"
+            [page]
+            [server]
+            [[monitors]]
+            id = "nightly"
+            name = "Nightly"
+            kind = "push"
+            interval_secs = 93600
+            push_poll_secs = 30
+            push_token = "0123456789abcdef"
+            "#,
+        )
+        .expect("config");
+        assert_eq!(
+            evaluation_interval(&config.monitors[0]),
+            std::time::Duration::from_secs(30)
+        );
+    }
+
+    /// A reminder is due every period after the down was last sent, once
+    /// however long it was held back, and never for a local-only down or
+    /// once the outage is over.
+    #[test]
+    fn a_reminder_is_due_once_per_period_of_a_confirmed_outage() {
+        let mut state = AlertState::resumed_down(2);
+        assert!(!state.remind_due(1000, 60), "no send time, no reminder");
+        state.reminded = Some(100);
+        assert!(!state.remind_due(159, 60));
+        assert!(state.remind_due(160, 60));
+        assert!(state.remind_due(10_000, 60), "held back: one is due");
+        state.reminded = Some(10_000);
+        assert!(!state.remind_due(10_000, 60), "not a burst");
+        state.local_only_asked = Some(10_000);
+        assert!(!state.remind_due(20_000, 60));
+        state.local_only_asked = None;
+        state.observe_up();
+        state.level = AlertLevel::Healthy;
+        assert!(!state.remind_due(20_000, 60));
+    }
+
     #[test]
     fn a_degradation_is_confirmed_at_the_threshold_and_said_once() {
         let mut state = AlertState::default();
@@ -1538,6 +1697,7 @@ mod tests {
         match tokio::time::timeout(wait, rx.recv()).await {
             Ok(Some(AlertMsg::Down(alert))) => Some(("down", alert.id)),
             Ok(Some(AlertMsg::Recovered { id, .. })) => Some(("recovered", id)),
+            Ok(Some(AlertMsg::Reminder(alert))) => Some(("reminder", alert.id)),
             _ => None,
         }
     }
@@ -1622,6 +1782,73 @@ mod tests {
         assert_eq!(
             next_alert(&mut alerts_rx, Duration::from_secs(5)).await,
             Some(("recovered", "job".to_owned()))
+        );
+        task.abort();
+    }
+
+    /// An outage that lasts is reminded of every `repeat_alert_secs`, its
+    /// clock kept in the database; a recovery stops the reminders.
+    #[tokio::test]
+    async fn a_lasting_outage_is_reminded_of_until_it_recovers() {
+        let store = Store::in_memory().await;
+        let config = crate::config::parse(
+            r#"
+            [page]
+            [server]
+            [alerts]
+            fail_threshold = 1
+            [[monitors]]
+            id = "job"
+            name = "Job"
+            kind = "push"
+            allow_unauthenticated = true
+            interval_secs = 30
+            push_poll_secs = 1
+            repeat_alert_secs = 2
+            "#,
+        )
+        .expect("config");
+        let (_config_tx, config_rx) = watch::channel(Arc::new(config));
+        let (_shutdown_tx, shutdown_rx) = watch::channel(false);
+        let (alerts_tx, mut alerts_rx) = mpsc::unbounded_channel();
+        let cell = AlertCell::default();
+        db::insert_push(&store, "job", CheckStatus::Down, None, Some("failed"))
+            .await
+            .unwrap();
+        let task = monitor_task(0, &store, &config_rx, &alerts_tx, &cell, &shutdown_rx);
+        assert_eq!(
+            next_alert(&mut alerts_rx, Duration::from_secs(5)).await,
+            Some(("down", "job".to_owned()))
+        );
+        let reminder = Some(("reminder", "job".to_owned()));
+        assert_eq!(
+            next_alert(&mut alerts_rx, Duration::from_secs(5)).await,
+            reminder
+        );
+        assert!(
+            db::meta_get(&store, &reminded_key("job"))
+                .await
+                .unwrap()
+                .is_some()
+        );
+        assert_eq!(
+            next_alert(&mut alerts_rx, Duration::from_secs(5)).await,
+            reminder
+        );
+        db::insert_push(&store, "job", CheckStatus::Up, None, None)
+            .await
+            .unwrap();
+        assert_eq!(
+            next_alert(&mut alerts_rx, Duration::from_secs(5)).await,
+            Some(("recovered", "job".to_owned()))
+        );
+        assert_eq!(
+            next_alert(&mut alerts_rx, Duration::from_secs(4)).await,
+            None
+        );
+        assert_eq!(
+            db::meta_get(&store, &reminded_key("job")).await.unwrap(),
+            None
         );
         task.abort();
     }
@@ -1890,6 +2117,49 @@ mod tests {
             "waited for the global: {failures:?}"
         );
         assert!(failures["lenient"] >= 3, "did not wait: {failures:?}");
+    }
+
+    /// A failure short of the threshold is checked again after
+    /// `retry_interval_secs`, not a whole interval later.
+    #[tokio::test]
+    async fn an_unconfirmed_failure_is_checked_again_after_the_retry_interval() {
+        let port = closed_port().await;
+        let config = crate::config::parse(&format!(
+            r#"
+            [page]
+            [server]
+            [[monitors]]
+            id = "retry"
+            name = "Retry"
+            kind = "tcp"
+            target = "127.0.0.1:{port}"
+            interval_secs = 3600
+            timeout_secs = 1
+            probe_retries = 0
+            fail_threshold = 3
+            retry_interval_secs = 1
+            "#
+        ))
+        .expect("config");
+        let (_config_tx, config_rx) = watch::channel(Arc::new(config));
+        let store = Store::in_memory().await;
+        let (_shutdown_tx, shutdown_rx) = watch::channel(false);
+        let (alerts_tx, mut alerts_rx) = mpsc::unbounded_channel();
+        let task = monitor_task(
+            0,
+            &store,
+            &config_rx,
+            &alerts_tx,
+            &AlertCell::default(),
+            &shutdown_rx,
+        );
+        // Three checks in a few seconds, not three hours (the id's first
+        // tick comes about four seconds in, see `stagger_offset`).
+        assert_eq!(
+            next_alert(&mut alerts_rx, Duration::from_secs(20)).await,
+            Some(("down", "retry".to_owned()))
+        );
+        task.abort();
     }
 
     /// One tcp monitor on `port`, checked every second and confirmed down
