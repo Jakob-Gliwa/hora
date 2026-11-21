@@ -3285,3 +3285,37 @@ fn pushover_channel_options_are_validated() {
         assert!(load(&format!("{MINIMAL}{channel}{bad}")).is_err(), "{bad}");
     }
 }
+
+/// What a fork config carries beyond upstream's: a monitor's description
+/// (kept), the database sizing (checked, not applied), and the fork's
+/// built-in monitors (read, warned about, ignored).
+#[test]
+fn fork_sections_load() {
+    let config = load(&format!("{MINIMAL}\ndescription = 'the shop front'")).unwrap();
+    assert_eq!(
+        config.monitors[0].description.as_deref(),
+        Some("the shop front")
+    );
+    let sized = MINIMAL.replace(
+        "[server]",
+        "[server]\ndatabase = { cache_kib = 2048, max_connections = 4 }",
+    );
+    let config = load(&sized).unwrap();
+    let database = config.server.database.expect("database");
+    assert_eq!(
+        (database.cache_kib, database.max_connections),
+        (Some(2048), Some(4))
+    );
+    for bad in ["cache_kib = 0", "max_connections = 0", "pool = 3"] {
+        let toml = MINIMAL.replace("[server]", &format!("[server]\ndatabase = {{ {bad} }}"));
+        assert!(load(&toml).is_err(), "{bad}");
+    }
+    let builtin = MINIMAL.replace(
+        "[server]",
+        "[server]\n[config_monitor]\nname = 'Config'\n[self_monitor]\nname = 'Self'\ngroup = 'Watchdog'",
+    );
+    let (loaded, warnings) = captured_warnings(|| load(&builtin));
+    loaded.unwrap();
+    assert_eq!(warnings.len(), 2, "{warnings:?}");
+    assert!(warnings[0].contains("[config_monitor]"), "{warnings:?}");
+}

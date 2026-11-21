@@ -42,6 +42,7 @@ pub(crate) fn monitor_from_raw(mut raw: RawMonitor) -> anyhow::Result<Monitor> {
     Ok(Monitor {
         id: raw.id,
         name: raw.name,
+        description: raw.description,
         interval_secs: raw.interval_secs,
         timeout_secs: raw.timeout_secs,
         degraded_over_ms: raw.degraded_over_ms,

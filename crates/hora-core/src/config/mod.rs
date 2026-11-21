@@ -74,6 +74,14 @@ pub struct Config {
     /// one message per release). On by default.
     #[serde(default)]
     pub updates: Updates,
+    /// The built-in monitor of the configuration itself, as the fork wrote
+    /// it: read so such a file loads, not acted on yet (warned about).
+    #[serde(default)]
+    pub config_monitor: Option<toml::Table>,
+    /// The built-in self-check monitor, as the fork wrote it: read so such
+    /// a file loads, not acted on yet (warned about).
+    #[serde(default)]
+    pub self_monitor: Option<toml::Table>,
     /// Where exec-probe executables live, from the `HORA_EXEC_DIR`
     /// environment variable - never from the file. The separation is the
     /// security model: the hot-reloadable config alone must not be able to
@@ -411,6 +419,22 @@ pub struct Server {
     /// always works too.
     #[serde(default)]
     pub group_tokens: std::collections::HashMap<String, Secret>,
+    /// SQLite sizing: `{ cache_kib, max_connections }`. Validated, not yet
+    /// applied - the daemon keeps its two fixed pools for now.
+    #[serde(default)]
+    pub database: Option<DatabaseSettings>,
+}
+
+/// `[server] database = { cache_kib = 2048, max_connections = 4 }`.
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DatabaseSettings {
+    /// Page cache per connection, KiB.
+    #[serde(default)]
+    pub cache_kib: Option<u32>,
+    /// Connections of the pool.
+    #[serde(default)]
+    pub max_connections: Option<u32>,
 }
 
 /// Alerting and retention policy, independent of any notification channel.

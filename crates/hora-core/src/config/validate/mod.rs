@@ -144,19 +144,12 @@ pub(super) fn validate(config: &Config) -> anyhow::Result<()> {
         );
     }
     let channel_names = validate_channels(config)?;
+    validate_reserved(config)?;
     if config.alerts.repeat_alert_secs > 0 {
         validate_period("alerts.repeat_alert_secs", config.alerts.repeat_alert_secs)?;
     }
 
-    for window in &config.maintenance {
-        if let super::MaintenanceTime::Fixed { start, end } = &window.time {
-            anyhow::ensure!(
-                start < end,
-                "maintenance window {:?}: start must be before end",
-                window.title
-            );
-        }
-    }
+    validate_maintenance(config)?;
 
     let mut seen = HashSet::new();
     for monitor in &config.monitors {
@@ -274,6 +267,49 @@ fn validate_push_auth(monitor: &super::Monitor) -> anyhow::Result<()> {
              who can reach /api/push can forge them",
             monitor.id
         );
+    }
+    Ok(())
+}
+
+/// A fixed maintenance window ends after it starts (a recurring one was
+/// checked as it was read).
+fn validate_maintenance(config: &Config) -> anyhow::Result<()> {
+    for window in &config.maintenance {
+        if let super::MaintenanceTime::Fixed { start, end } = &window.time {
+            anyhow::ensure!(
+                start < end,
+                "maintenance window {:?}: start must be before end",
+                window.title
+            );
+        }
+    }
+    Ok(())
+}
+
+/// What this build reads but does not act on yet: the database sizing is
+/// checked for sense; the fork's built-in monitors are warned about.
+fn validate_reserved(config: &Config) -> anyhow::Result<()> {
+    if let Some(database) = &config.server.database {
+        anyhow::ensure!(
+            database
+                .cache_kib
+                .is_none_or(|kib| (64..=1_048_576).contains(&kib)),
+            "server.database.cache_kib must be between 64 and 1048576"
+        );
+        anyhow::ensure!(
+            database
+                .max_connections
+                .is_none_or(|connections| (1..=64).contains(&connections)),
+            "server.database.max_connections must be between 1 and 64"
+        );
+    }
+    for (section, set) in [
+        ("config_monitor", config.config_monitor.is_some()),
+        ("self_monitor", config.self_monitor.is_some()),
+    ] {
+        if set {
+            tracing::warn!("[{section}] is not supported by this build yet: ignored");
+        }
     }
     Ok(())
 }

@@ -18,6 +18,10 @@ use super::secret::Secret;
 pub(crate) struct RawMonitor {
     pub(crate) id: String,
     pub(crate) name: String,
+    /// The operator's note on what the monitor watches and why: kept with
+    /// the config, never shown on a page.
+    #[serde(default)]
+    pub(crate) description: Option<String>,
     #[serde(default)]
     pub(crate) kind: Kind,
     /// Probe target (URL for HTTP, `host:port` for TCP, host or IP for ICMP,
@@ -270,6 +274,7 @@ impl Default for RawMonitor {
         Self {
             id: String::new(),
             name: String::new(),
+            description: None,
             kind: Kind::default(),
             target: String::new(),
             interval_secs: 60,

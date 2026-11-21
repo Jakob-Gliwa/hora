@@ -110,6 +110,8 @@ impl std::fmt::Debug for ReleaseWatch {
 pub struct Monitor {
     pub id: String,
     pub name: String,
+    /// The operator's note; never shown on a page.
+    pub description: Option<String>,
     pub interval_secs: u64,
     pub timeout_secs: u64,
     /// Latency above which a passing check counts as degraded.
@@ -405,6 +407,7 @@ impl std::fmt::Debug for Monitor {
         f.debug_struct("Monitor")
             .field("id", &self.id)
             .field("name", &self.name)
+            .field("description", &self.description)
             .field("interval_secs", &self.interval_secs)
             .field("timeout_secs", &self.timeout_secs)
             .field("degraded_over_ms", &self.degraded_over_ms)
