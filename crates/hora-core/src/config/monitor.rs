@@ -200,6 +200,8 @@ pub struct HttpSpec {
     pub keyword: Option<KeywordAssert>,
     /// A `JSONPath` evaluated against a JSON body.
     pub json: Option<JsonAssert>,
+    /// A jq expression evaluated against a JSON body.
+    pub jq: Option<crate::assertion::JqAssert>,
     /// A number extracted from the body by a regex, within bounds.
     pub number: Option<NumberAssert>,
     /// Cap (KiB) on the body read for the assertions (default 1 MiB).
@@ -367,7 +369,7 @@ impl HttpSpec {
     /// Whether any body assertion is configured.
     #[must_use]
     pub fn asserts_body(&self) -> bool {
-        self.keyword.is_some() || self.json.is_some() || self.number.is_some()
+        self.keyword.is_some() || self.json.is_some() || self.jq.is_some() || self.number.is_some()
     }
 }
 
@@ -383,6 +385,7 @@ impl std::fmt::Debug for HttpSpec {
             .field("headers", &self.headers)
             .field("keyword", &self.keyword)
             .field("json", &self.json)
+            .field("jq", &self.jq)
             .field("number", &self.number)
             .field("max_body_kb", &self.max_body_kb)
             .field("proxy", &self.proxy.as_deref().map(redact_url_secrets))

@@ -3319,3 +3319,40 @@ fn fork_sections_load() {
     assert_eq!(warnings.len(), 2, "{warnings:?}");
     assert!(warnings[0].contains("[config_monitor]"), "{warnings:?}");
 }
+
+#[test]
+fn jq_is_compiled_at_load_and_options_require_an_expression() {
+    assert!(load(&format!("{MINIMAL}\njq='('")).is_err());
+    assert!(load(&format!("{MINIMAL}\njq_expected='true'")).is_err());
+    assert!(load(&format!("{MINIMAL}\njq_operator='=='")).is_err());
+    assert!(load(&format!("{MINIMAL}\njq='.a'\njq_operator='~'")).is_err());
+    let config = load(&format!(
+        "{MINIMAL}\njq='.value | tonumber'\njq_operator='>='\njq_expected='2'"
+    ))
+    .unwrap();
+    let jq = http_spec(&config.monitors[0]).jq.as_ref().unwrap();
+    assert_eq!(jq.operator, crate::assertion::Comparison::Ge);
+    assert_eq!(jq.expected.as_deref(), Some("2"));
+    assert!(
+        load(&format!("{MINIMAL}\njq='.a'\nmethod='HEAD'"))
+            .unwrap_err()
+            .to_string()
+            .contains("HEAD")
+    );
+}
+
+#[test]
+fn jq_requires_a_body_assertion_kind() {
+    let src = r#"
+        [page]
+        [server]
+        [[monitors]]
+        id = "db"
+        name = "DB"
+        kind = "tcp"
+        target = "db.example:5432"
+        interval_secs = 60
+        jq = ".ok"
+    "#;
+    assert!(load(src).is_err());
+}

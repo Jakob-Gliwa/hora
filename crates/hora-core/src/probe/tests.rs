@@ -928,3 +928,26 @@ async fn icmp_sends_the_configured_count_within_the_timeout() {
         assert!(elapsed >= std::time::Duration::from_secs(1), "{elapsed:?}");
     }
 }
+
+#[tokio::test]
+async fn jq_http_assertions_evaluate_the_response_body() {
+    let (url, _) = serve(
+        "HTTP/1.1 200 OK\r\nContent-Length: 13\r\nConnection: close\r\n\r\n{\"value\":\"5\"}",
+    )
+    .await;
+    let client = crate::http::probe_client(None).unwrap();
+    let mut monitor = http_monitor(&url);
+    spec_mut(&mut monitor).jq = Some(crate::assertion::JqAssert {
+        query: crate::config::Compiled::parse(".value | tonumber").unwrap(),
+        expected: Some("4".into()),
+        operator: crate::assertion::Comparison::Gt,
+    });
+    assert!(http(&client, &monitor, spec(&monitor)).await.is_up());
+    spec_mut(&mut monitor).jq.as_mut().unwrap().expected = Some("6".into());
+    let down = http(&client, &monitor, spec(&monitor)).await;
+    assert_eq!(down.error.as_deref(), Some("jq assertion failed"));
+    assert_eq!(
+        public_reason(down.reason, down.error.as_deref().unwrap()),
+        "content check failed"
+    );
+}

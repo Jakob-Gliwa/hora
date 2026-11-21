@@ -98,7 +98,7 @@ judges the first answer and does not follow redirects: see below.
 **`method = "HEAD"`** asks for the headers alone: for a large page or a
 download you do not want fetched every minute, or an endpoint that counts
 its `GET`s. The answer to a `HEAD` has no body, so a monitor with `keyword`,
-`json_query` or `number_regex` and `method = "HEAD"` is refused at load.
+`json_query`, `jq` or `number_regex` and `method = "HEAD"` is refused at load.
 `"GET"` is the default and the only other method: Hora sends no request
 body, so there is no `POST` or `PUT`. Some servers answer a `HEAD` with a
 405 or another status than their `GET`: check with
@@ -110,6 +110,9 @@ body, so there is no `POST` or `PUT`. Some servers answer a `HEAD` with a
 keyword = "operational"   # body must contain this (keyword_invert = true → must NOT)
 json_query = "$.status"   # JSONPath (RFC 9535) against a JSON body
 json_expected = "ok"      # the queried value must equal this (omit = must match a node)
+jq = '.data.result[0].value[1] | tonumber'  # jq (jaq) against a JSON body
+jq_expected = "10"        # compared with the single result (omit = true)
+jq_operator = ">="        # ==, !=, <, <=, >, >= (default ==)
 number_regex = 'in stock: (\d+)'  # extract a number from the body (first capture
                           # group, or the whole match) - down when nothing matches
 number_min = 1            # ... or when the number is below this (inclusive)
@@ -122,6 +125,16 @@ JSON endpoint behind them - a queue depth, a stock level, a sensor's "receivers
 online" counter. When the page is HTML, anchor the pattern on the surrounding
 markup: `number_regex = 'class="shipCount">(\d+)<'` with `number_min = 1` goes
 down the moment the counter reads zero (or disappears entirely).
+
+`jq` is for answers a `JSONPath` cannot judge: arithmetic, counts, a value
+inside a string (`tonumber`). The expression must produce exactly one
+non-null scalar: no output, several outputs, `null`, an array or an object
+fail the check, as does a body that is not JSON. `jq_expected` and the result
+compare as numbers when both are numbers (`"2.0" == 2`), as text otherwise;
+`<`, `<=`, `>` and `>=` need numbers on both sides. Expressions are compiled
+once at load (a syntax error refuses the file) and shared between monitors
+that spell them the same; the filters run without environment, file or
+module access (`env` and `import` are not available).
 
 Redirects are followed (up to 10), but configured headers, which may carry
 credentials, are only re-attached while the redirect stays on the original

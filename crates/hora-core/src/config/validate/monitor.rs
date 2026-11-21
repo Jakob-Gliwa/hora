@@ -105,6 +105,7 @@ fn spec_of(raw: &mut RawMonitor) -> anyhow::Result<MonitorKind> {
                 }),
                 None => None,
             },
+            jq: jq_of(raw)?,
             number: match raw.number_regex.take() {
                 Some(regex) => Some(NumberAssert {
                     regex: regex.compiled().ok_or_else(|| compiled("number_regex"))?,
@@ -169,6 +170,20 @@ fn spec_of(raw: &mut RawMonitor) -> anyhow::Result<MonitorKind> {
             })
         }
     })
+}
+
+/// `jq` / `jq_expected` / `jq_operator`, moved out of the raw table.
+fn jq_of(raw: &mut RawMonitor) -> anyhow::Result<Option<crate::assertion::JqAssert>> {
+    let Some(query) = raw.jq.take() else {
+        return Ok(None);
+    };
+    Ok(Some(crate::assertion::JqAssert {
+        query: query
+            .compiled()
+            .ok_or_else(|| anyhow::anyhow!("monitor {}: invalid jq", raw.id))?,
+        expected: raw.jq_expected.take(),
+        operator: raw.jq_operator.unwrap_or_default(),
+    }))
 }
 
 /// The payload of an echo request by default: 16 bytes.
@@ -318,15 +333,6 @@ fn validate_monitor_io(monitor: &RawMonitor) -> anyhow::Result<()> {
             monitor.id
         );
     }
-    anyhow::ensure!(
-        monitor.kind == Kind::Http
-            || (monitor.keyword.is_none()
-                && monitor.json_query.is_none()
-                && monitor.number_regex.is_none()
-                && monitor.proxy.is_none()),
-        "monitor {}: keyword/json_query/number_regex/proxy require an http monitor",
-        monitor.id
-    );
     validate_body_assertions(monitor)?;
     if let Some(proxy) = &monitor.proxy {
         reqwest::Proxy::all(proxy)
@@ -441,12 +447,14 @@ fn validate_http_request(monitor: &RawMonitor) -> anyhow::Result<()> {
     }
     // The answer to a HEAD has no body: an assertion on it would fail on
     // every check, and the monitor would be down for good.
-    let asserts_body =
-        monitor.keyword.is_some() || monitor.json_query.is_some() || monitor.number_regex.is_some();
+    let asserts_body = monitor.keyword.is_some()
+        || monitor.json_query.is_some()
+        || monitor.jq.is_some()
+        || monitor.number_regex.is_some();
     anyhow::ensure!(
         method.get() != Some(&HttpMethod::Head) || !asserts_body,
         "monitor {}: method = \"HEAD\" gets no response body, so keyword / json_query / \
-         number_regex could never pass: use \"GET\" or drop the assertion",
+         jq / number_regex could never pass: use \"GET\" or drop the assertion",
         monitor.id
     );
     Ok(())
@@ -456,6 +464,29 @@ fn validate_http_request(monitor: &RawMonitor) -> anyhow::Result<()> {
 /// compile, and the number bounds only make sense with a regex to extract the
 /// number and in min <= max order.
 fn validate_body_assertions(monitor: &RawMonitor) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        monitor.kind == Kind::Http
+            || (monitor.keyword.is_none()
+                && monitor.json_query.is_none()
+                && monitor.number_regex.is_none()
+                && monitor.proxy.is_none()),
+        "monitor {}: keyword/json_query/number_regex/proxy require an http monitor",
+        monitor.id
+    );
+    anyhow::ensure!(
+        monitor.kind == Kind::Http || monitor.jq.is_none(),
+        "monitor {}: jq requires an http monitor",
+        monitor.id
+    );
+    if let Some(err) = monitor.jq.as_ref().and_then(Parsed::error) {
+        anyhow::bail!("monitor {}: invalid jq: {err}", monitor.id);
+    }
+    // New keys: without an expression they are a mistake, said at once.
+    anyhow::ensure!(
+        monitor.jq.is_some() || (monitor.jq_expected.is_none() && monitor.jq_operator.is_none()),
+        "monitor {}: jq_expected/jq_operator require jq",
+        monitor.id
+    );
     if let Some(err) = monitor.json_query.as_ref().and_then(Parsed::error) {
         anyhow::bail!("monitor {}: invalid json_query: {err}", monitor.id);
     }
