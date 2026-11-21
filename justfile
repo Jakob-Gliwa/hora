@@ -91,19 +91,14 @@ deps:
         [ "$ours" = "$theirs" ] && state=ok || state="behind -> $theirs"
         printf '  %-36s %-10s %s\n' "$repo" "$ours" "$state"
     done
-    echo; echo "== Bun (docs workflow)"
-    ours=$(sed -n 's/^ *bun-version: *\([0-9.]*\).*/\1/p' .github/workflows/docs.yml)
-    theirs=$(gh api repos/oven-sh/bun/releases/latest --jq .tag_name 2>/dev/null || echo "?")
-    theirs=${theirs#bun-v}
-    printf '  %-36s %-10s %s\n' bun "$ours" "$([ "$ours" = "$theirs" ] && echo ok || echo "behind -> $theirs")"
     echo; echo "== Docker base images"
     ours=$(sed -n 's/^FROM alpine:\([0-9.]*\).*/\1/p' Dockerfile)
     theirs=$(curl -fsS "https://registry.hub.docker.com/v2/repositories/library/alpine/tags?page_size=50" \
         | python3 -c 'import json,sys,re; print(max((t["name"] for t in json.load(sys.stdin)["results"] if re.fullmatch(r"\d+\.\d+",t["name"])), key=lambda v: tuple(map(int,v.split(".")))))')
     printf '  %-36s %-10s %s\n' alpine "$ours" "$([ "$ours" = "$theirs" ] && echo ok || echo "behind -> $theirs")"
-    echo "  blackdex/rust-musl                   stable     (floating tag, follows Rust stable)"
+    echo "  rust (alpine)                        $(sed -n 's/^FROM rust:\([^@]*\)@.*/\1/p' Dockerfile)  (digest-pinned; Dependabot bumps the digest)"
 
-# Build the image for this machine and smoke-test it, as CI does before a release
+# Build the image for this machine and smoke-test it, as CI does before publishing
 image-smoke:
     docker build -t hora:smoke .
-    .github/scripts/image-smoke.sh hora:smoke
+    bash scripts/smoke-container.sh hora:smoke

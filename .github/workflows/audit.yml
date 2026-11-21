@@ -7,7 +7,7 @@ name: Security audit
 # database on every push, PR and tag, so a known CVE still fails the build.
 on:
   push:
-    branches: [main]
+    branches: [main, port/v0.12]
     paths:
       - "**/Cargo.toml"
       - "**/Cargo.lock"
@@ -29,7 +29,7 @@ permissions:
 
 jobs:
   audit:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -40,7 +40,7 @@ jobs:
       # from source (~3min) on every run - 98% of the daily job for a 3s scan.
       # A cache is the wrong tool here: the daily cron would keep a "latest"
       # binary warm forever, and the advisory DB must stay fresh anyway.
-      - uses: taiki-e/install-action@83ac0ad63c0167e6f06796fab0fce28db1bf3db0 # v2.87.22
+      - uses: taiki-e/install-action@4a76afe23f9e08d2d9550fb56e556444e8611d21 # v2.90.4
         with:
           tool: cargo-audit
       - uses: rustsec/audit-check@69366f33c96575abad1ee0dba8212993eecbe998 # v2.0.0

@@ -7,3 +7,14 @@
 *.db-wal
 
 TODO.md
+# Local migration input, generated configuration and credentials
+/hora-fork-spec/
+/.local/
+.env
+.env.*
+!.env.example
+.DS_Store
+
+__pycache__/
+*.pyc
+/target-musl

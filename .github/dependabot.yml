@@ -1,0 +1,23 @@
+version: 2
+# scripts/automate-updates.py merges what passes its policy (crates.io
+# upgrades, incompatible ones included; base image digests) once CI is green;
+# everything else (workflows, image tags) waits for review.
+updates:
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: daily
+    groups:
+      rust-patches:
+        update-types: [patch]
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    # Let compromised action releases surface before they reach the publish job.
+    cooldown:
+      default-days: 7
+  - package-ecosystem: docker
+    directory: /
+    schedule:
+      interval: weekly
