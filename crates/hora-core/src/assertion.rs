@@ -1,26 +1,59 @@
 //! jq assertions (`jq` / `jq_expected` / `jq_operator`): compiled once at
 //! load with jaq, shared by every monitor that spells the same expression,
 //! and evaluated without environment, filesystem or module access.
+//!
+//! The expression is configuration; the payload it runs on is not. What the
+//! payload controls is bounded: its nesting (`serde_json` stops at 128
+//! levels, on input and in `fromjson`) and the outputs pulled (two at most).
 
 use std::collections::HashMap;
 use std::sync::{Arc, LazyLock, Mutex, PoisonError, Weak};
 
-use jaq_core::{
-    Ctx, Vars, data,
-    load::{Arena, File, Loader},
-    unwrap_valr,
-};
+use jaq_core::load::lex::{StrPart, Tok, Token};
+use jaq_core::load::{Arena, File, Lexer, Loader};
+use jaq_core::{Ctx, Cv, ValXs, Vars, data, native};
 use jaq_json::Val;
 use serde::Deserialize;
 
 use crate::config::{Compiled, ParseField};
 
-type Filter = jaq_core::Filter<data::JustLut<Val>>;
+type Data = data::JustLut<Val>;
+type Filter = jaq_core::Filter<Data>;
 
 // Repeated monitor expressions share bytecode, including across live reloads.
 // Weak entries never keep a removed program alive; prune dead keys on misses.
 static PROGRAMS: LazyLock<Mutex<HashMap<String, Weak<Filter>>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// Native functions left out: `halt` would exit the process, and jaq's
+/// `fromjson` (which `tonumber` calls) parses without a depth limit, so a
+/// deeply nested string in a payload would overflow the stack. It is
+/// replaced by [`fromjson`].
+const NATIVE_OUT: &[&str] = &["halt", "fromjson"];
+
+/// `fromjson` with `serde_json`'s nesting limit.
+fn fromjson(cv: Cv<'_, Data>) -> ValXs<'_, Val> {
+    native::bome(match cv.1 {
+        Val::TStr(text) => {
+            serde_json::from_slice(&text).map_err(|_| jaq_core::Error::str("cannot parse as JSON"))
+        }
+        other => Err(jaq_core::Error::typ(other, "string")),
+    })
+}
+
+/// Whether the tokens define a function. A recursive one can overflow the
+/// stack, which aborts the process rather than failing the check.
+fn defines_function(tokens: &[Token<&str>]) -> bool {
+    tokens.iter().any(|Token(text, tok)| match tok {
+        Tok::Word => *text == "def",
+        Tok::Block(inner) => defines_function(inner),
+        Tok::Str(parts) => parts.iter().any(|part| match part {
+            StrPart::Term(term) => defines_function(std::slice::from_ref(term)),
+            StrPart::Str(_) | StrPart::Char(_) => false,
+        }),
+        _ => false,
+    })
+}
 
 /// A compiled jq filter, shared (by its text) with every other monitor that
 /// spells the same expression.
@@ -34,7 +67,13 @@ impl ParseField for JqProgram {
             return Ok(Self(program));
         }
         programs.retain(|_, program| program.strong_count() > 0);
-        // No env, debug, filesystem, module loader or subprocess capabilities.
+        if Lexer::new(raw)
+            .lex()
+            .is_ok_and(|tokens| defines_function(&tokens))
+        {
+            return Err("function definitions (def) are not available".to_owned());
+        }
+        // No env, debug, halt, filesystem, module loader or subprocess capabilities.
         let defs = jaq_core::defs()
             .chain(jaq_std::defs().filter(|def| {
                 matches!(
@@ -79,7 +118,13 @@ impl ParseField for JqProgram {
             .chain(jaq_json::defs());
         let funs = jaq_core::funs()
             .chain(jaq_std::base_funs())
-            .chain(jaq_json::funs());
+            .chain(jaq_json::funs())
+            .filter(|(name, ..)| !NATIVE_OUT.contains(name))
+            .chain([native::run::<Data>((
+                "fromjson",
+                native::v(0),
+                fromjson as jaq_core::RunPtr<Data>,
+            ))]);
         let arena = Arena::default();
         let loader = Loader::new(defs);
         let modules = loader
@@ -115,8 +160,8 @@ impl JqProgram {
     /// anything other than exactly one non-null scalar output.
     pub fn evaluate(&self, body: &[u8]) -> Result<serde_json::Value, &'static str> {
         let input: Val = serde_json::from_slice(body).map_err(|_| "payload is not valid JSON")?;
-        let ctx = Ctx::<data::JustLut<Val>>::new(&self.0.lut, Vars::new([]));
-        let mut output = self.0.id.run((ctx, input)).map(unwrap_valr);
+        let ctx = Ctx::<Data>::new(&self.0.lut, Vars::new([]));
+        let mut output = self.0.id.run((ctx, input));
         let value = output
             .next()
             .ok_or("jq produced no value")?
@@ -299,6 +344,65 @@ mod tests {
                 operator,
             };
             assert_eq!(assertion.check(b"2").is_none(), pass);
+        }
+    }
+
+    #[test]
+    fn tonumber_on_numeric_strings_is_unchanged() {
+        let run = |query: &str, body: &str| {
+            JqProgram::parse_field(query)
+                .unwrap()
+                .evaluate(body.as_bytes())
+        };
+        for (body, expected) in [
+            (r#""42""#, serde_json::json!(42)),
+            (r#""3.5""#, serde_json::json!(3.5)),
+            (r#""-1""#, serde_json::json!(-1)),
+            (r#""1e3""#, serde_json::json!(1000.0)),
+        ] {
+            assert_eq!(run("tonumber", body), Ok(expected), "{body}");
+        }
+        assert!(check("tonumber == 42", r#""42""#, "true"));
+        assert!(check("tonumber", r#""1e3""#, "1000"));
+        assert_eq!(
+            run(".a | fromjson | .b", r#"{"a":"{\"b\":3}"}"#),
+            Ok(serde_json::json!(3))
+        );
+    }
+
+    #[test]
+    fn deeply_nested_strings_fail_without_overflowing_the_stack() {
+        let run = |query: &str, body: &str| {
+            JqProgram::parse_field(query)
+                .unwrap()
+                .evaluate(body.as_bytes())
+        };
+        let nested = format!(
+            r#"{{"a":"{}1{}"}}"#,
+            "[".repeat(100_000),
+            "]".repeat(100_000)
+        );
+        assert!(run(".a | tonumber", &nested).is_err());
+        assert!(run(".a | fromjson | length", &nested).is_err());
+    }
+
+    #[test]
+    fn halt_def_and_the_environment_are_refused_at_load() {
+        for query in [
+            "env",
+            "$ENV",
+            "now",
+            "input",
+            "debug",
+            "halt",
+            "halt(1)",
+            "halt_error",
+            "def f: 1 + f; f",
+            "[.[] | def f: .; f]",
+            "\"\\(def f: .; f)\"",
+            "include \"secret\"; .",
+        ] {
+            assert!(JqProgram::parse_field(query).is_err(), "{query}");
         }
     }
 }
